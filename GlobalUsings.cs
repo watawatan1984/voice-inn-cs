@@ -1,0 +1,9 @@
+global using Application = System.Windows.Application;
+global using MessageBox = System.Windows.MessageBox;
+global using MessageBoxButton = System.Windows.MessageBoxButton;
+global using MessageBoxImage = System.Windows.MessageBoxImage;
+global using Clipboard = System.Windows.Clipboard;
+global using Color = System.Windows.Media.Color;
+global using Point = System.Windows.Point;
+global using ContextMenu = System.Windows.Controls.ContextMenu;
+global using MenuItem = System.Windows.Controls.MenuItem;

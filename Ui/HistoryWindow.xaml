@@ -1,0 +1,45 @@
+<Window x:Class="VoiceIn.Ui.HistoryWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="文字起こし履歴"
+        Width="580" Height="420"
+        WindowStartupLocation="CenterScreen"
+        Background="#1E1E2E"
+        Foreground="#CDD6F4"
+        FontFamily="Segoe UI, Meiryo">
+    <Window.Resources>
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="#89B4FA"/>
+            <Setter Property="Foreground" Value="#11111B"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Padding" Value="12,6"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Text="直近の文字起こし履歴（最新50件）" FontSize="16" FontWeight="Bold" Margin="0,0,0,12"/>
+
+        <DataGrid x:Name="GridHistory" Grid.Row="1" AutoGenerateColumns="False"
+                  Background="#313244" Foreground="#CDD6F4" IsReadOnly="True"
+                  SelectionMode="Single">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="日時" Binding="{Binding CreatedAt}" Width="150"/>
+                <DataGridTextColumn Header="プロバイダ" Binding="{Binding Provider}" Width="80"/>
+                <DataGridTextColumn Header="テキスト" Binding="{Binding Text}" Width="*"/>
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="クリップボードにコピー" Click="OnCopyText" Background="#A6E3A1" Foreground="#11111B" Margin="0,0,8,0"/>
+            <Button Content="閉じる" Click="OnClose" Background="#45475A" Foreground="#CDD6F4"/>
+        </StackPanel>
+    </Grid>
+</Window>

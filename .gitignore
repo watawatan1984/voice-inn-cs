@@ -1,0 +1,19 @@
+## .NET build artifacts
+bin/
+obj/
+*.user
+*.userosscache
+*.suo
+*.userprefs
+.vs/
+
+## Environment variables (Sensitive information)
+.env
+*.env.local
+
+## App State & Logs
+app.log
+history.json
+settings.json
+temp_*.wav
+*.tmp

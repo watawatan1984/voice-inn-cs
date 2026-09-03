@@ -1,0 +1,166 @@
+<Window x:Class="VoiceIn.Ui.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Voice In 設定"
+        Width="640" Height="520"
+        WindowStartupLocation="CenterScreen"
+        Background="#1E1E2E"
+        Foreground="#CDD6F4"
+        FontFamily="Segoe UI, Meiryo">
+    <Window.Resources>
+        <Style TargetType="TabItem">
+            <Setter Property="Foreground" Value="#A6ADC8"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="Padding" Value="16,8"/>
+        </Style>
+        <Style TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#CDD6F4"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="#313244"/>
+            <Setter Property="Foreground" Value="#CDD6F4"/>
+            <Setter Property="BorderBrush" Value="#45475A"/>
+            <Setter Property="Padding" Value="6,4"/>
+        </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="Background" Value="#313244"/>
+            <Setter Property="Foreground" Value="#11111B"/>
+            <Setter Property="Padding" Value="6,4"/>
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="#89B4FA"/>
+            <Setter Property="Foreground" Value="#11111B"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Padding" Value="14,6"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TabControl Background="#181825" BorderBrush="#313244">
+            <!-- 一般設定 -->
+            <TabItem Header="一般">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="12">
+                    <StackPanel>
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="140"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="AI プロバイダ:"/>
+                            <ComboBox x:Name="CmbProvider" Grid.Column="1">
+                                <ComboBoxItem Content="gemini"/>
+                                <ComboBoxItem Content="groq"/>
+                            </ComboBox>
+                        </Grid>
+
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="140"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Gemini モデル:"/>
+                            <TextBox x:Name="TxtGeminiModel" Grid.Column="1"/>
+                        </Grid>
+
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="140"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="マイク入力デバイス:"/>
+                            <ComboBox x:Name="CmbMicDevice" Grid.Column="1"/>
+                        </Grid>
+
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="140"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="録音キー:"/>
+                            <ComboBox x:Name="CmbHoldKey" Grid.Column="1">
+                                <ComboBoxItem Content="alt_l (左Alt)"/>
+                                <ComboBoxItem Content="alt_r (右Alt)"/>
+                                <ComboBoxItem Content="ctrl_l (左Ctrl)"/>
+                                <ComboBoxItem Content="ctrl_r (右Ctrl)"/>
+                            </ComboBox>
+                        </Grid>
+
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="140"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="最大録音時間 (秒):"/>
+                            <TextBox x:Name="TxtMaxRecord" Grid.Column="1"/>
+                        </Grid>
+
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="140"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="貼り付け遅延 (ms):"/>
+                            <TextBox x:Name="TxtPasteDelay" Grid.Column="1"/>
+                        </Grid>
+
+                        <CheckBox x:Name="ChkAutoPaste" Content="文字起こし後に自動で貼り付ける (Auto Paste)" Foreground="#CDD6F4" Margin="0,6,0,8"/>
+                        <CheckBox x:Name="ChkContextAware" Content="コンテキスト認識によるプロンプト最適化を有効にする" Foreground="#CDD6F4"/>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- プロンプト設定 -->
+            <TabItem Header="プロンプト">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="12">
+                    <StackPanel>
+                        <TextBlock Text="Gemini プロンプト:" FontWeight="Bold" Margin="0,0,0,6"/>
+                        <TextBox x:Name="TxtGeminiPrompt" Height="100" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" Margin="0,0,0,14"/>
+
+                        <TextBlock Text="Groq Whisper プロンプト:" FontWeight="Bold" Margin="0,0,0,6"/>
+                        <TextBox x:Name="TxtGroqWhisperPrompt" Height="60" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" Margin="0,0,0,14"/>
+
+                        <TextBlock Text="Groq 文章整形 (LLaMA) プロンプト:" FontWeight="Bold" Margin="0,0,0,6"/>
+                        <TextBox x:Name="TxtGroqRefinePrompt" Height="100" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- 辞書設定 -->
+            <TabItem Header="辞書">
+                <Grid Margin="12">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Text="認識結果の単語置換ルールを登録します。" Margin="0,0,0,8"/>
+
+                    <DataGrid x:Name="GridDictionary" Grid.Row="1" AutoGenerateColumns="False" 
+                              Background="#313244" Foreground="#CDD6F4" CanUserAddRows="True">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="置換前 (From)" Binding="{Binding From}" Width="*"/>
+                            <DataGridTextColumn Header="置換後 (To)" Binding="{Binding To}" Width="*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <Button Grid.Row="2" Content="選択項目を削除" Click="OnDeleteDictItem" HorizontalAlignment="Left" Margin="0,8,0,0" Background="#F38BA8"/>
+                </Grid>
+            </TabItem>
+        </TabControl>
+
+        <!-- 下部操作ボタン -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button Content="キャンセル" Click="OnCancel" Background="#45475A" Foreground="#CDD6F4" Margin="0,0,8,0"/>
+            <Button Content="保存して適用" Click="OnSaveAndApply" Background="#A6E3A1" Foreground="#11111B"/>
+        </StackPanel>
+    </Grid>
+</Window>
