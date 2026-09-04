@@ -96,11 +96,15 @@ public partial class App : System.Windows.Application
 
     private void SetupNotifyIcon()
     {
+        // 状態別のトレイアイコンを起動時に一度だけ生成してキャッシュしておく
+        // (GDI ハンドルリークを避けるため。詳細は Ui/TrayIcons.cs のクラスコメント参照)。
+        TrayIcons.Initialize();
+
         _notifyIcon = new Forms.NotifyIcon
         {
             Text = "Voice In - 音声入力ツール",
             Visible = true,
-            Icon = SystemIcons.Application
+            Icon = TrayIcons.GetIcon("idle", SettingsManager.Instance.CurrentProvider)
         };
 
         UpdateTrayMenu();
@@ -159,8 +163,50 @@ public partial class App : System.Windows.Application
     {
         SettingsManager.Instance.CurrentProvider = provider;
         UpdateTrayMenu();
-        _overlayWindow?.SetState("idle");
+        SetAppState("idle");
         _notifyIcon?.ShowBalloonTip(1500, "Voice In", $"AIプロバイダを {provider} に切り替えました。", Forms.ToolTipIcon.Info);
+    }
+
+    /// <summary>
+    /// アプリの状態 (idle/recording/processing/success/error) をオーバーレイと
+    /// タスクトレイアイコンの両方に反映する。状態変更はここに一元化しており、
+    /// 個別に _overlayWindow.SetState(...) を直接呼ばないこと (トレイだけ状態が
+    /// 取り残されるため)。UI スレッド・バックグラウンドスレッド (Task.Run や
+    /// Task.Delay().ContinueWith の中) のどちらから呼んでも安全。
+    /// </summary>
+    private void SetAppState(string state)
+    {
+        // OverlayWindow.SetState は内部で Dispatcher.Invoke するため、
+        // 呼び出し元のスレッドを問わず安全に呼び出せる。
+        _overlayWindow?.SetState(state);
+
+        if (_notifyIcon == null)
+        {
+            return;
+        }
+
+        // NotifyIcon.Icon への代入は UI スレッドで行う必要があるため、明示的に marshal する。
+        // OnAutoStop と同様、シャットダウン中/済みの Dispatcher に Invoke すると
+        // 未処理例外でプロセスが落ちうるため、事前チェックと try/catch で保護する。
+        if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+        {
+            return;
+        }
+
+        try
+        {
+            Dispatcher.Invoke(() =>
+            {
+                if (_notifyIcon != null)
+                {
+                    _notifyIcon.Icon = TrayIcons.GetIcon(state, SettingsManager.Instance.CurrentProvider);
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"SetAppState の Dispatcher.Invoke に失敗しました: {ex.Message}");
+        }
     }
 
     private void OnKeyPressed()
@@ -176,12 +222,12 @@ public partial class App : System.Windows.Application
         var audioSettings = SettingsManager.Instance.Settings.Audio;
         try
         {
-            _overlayWindow?.SetState("recording");
+            SetAppState("recording");
             _audioRecorder.Start(audioSettings.InputDevice, audioSettings.MaxRecordSeconds);
         }
         catch (Exception ex)
         {
-            _overlayWindow?.SetState("error");
+            SetAppState("error");
             _notifyIcon?.ShowBalloonTip(2000, "Voice In エラー", $"録音の開始に失敗しました: {ex.Message}", Forms.ToolTipIcon.Error);
             ResetOverlayDelayed(1500);
         }
@@ -220,12 +266,12 @@ public partial class App : System.Windows.Application
         if (string.IsNullOrEmpty(wavPath) || _audioRecorder.IsSilence(audioSettings.MinDuration))
         {
             _audioRecorder.Cleanup();
-            _overlayWindow?.SetState("idle");
+            SetAppState("idle");
             return;
         }
 
         _isProcessing = true;
-        _overlayWindow?.SetState("processing");
+        SetAppState("processing");
 
         _ = Task.Run(async () =>
         {
@@ -288,7 +334,7 @@ public partial class App : System.Windows.Application
                 // 履歴保存
                 HistoryManager.Instance.AppendItem(text, null, currentProvider);
 
-                _overlayWindow?.SetState("success");
+                SetAppState("success");
 
                 // 自動貼り付け
                 if (!string.IsNullOrWhiteSpace(text) && audioSettings.AutoPaste)
@@ -306,7 +352,7 @@ public partial class App : System.Windows.Application
             catch (Exception ex)
             {
                 HistoryManager.Instance.AppendItem(string.Empty, ex.Message, SettingsManager.Instance.CurrentProvider);
-                _overlayWindow?.SetState("error");
+                SetAppState("error");
                 _notifyIcon?.ShowBalloonTip(3000, "Voice In 変換エラー", ex.Message, Forms.ToolTipIcon.Warning);
                 ResetOverlayDelayed(2000);
             }
@@ -324,7 +370,7 @@ public partial class App : System.Windows.Application
         {
             try
             {
-                _overlayWindow?.SetState("idle");
+                SetAppState("idle");
             }
             catch (Exception ex)
             {
@@ -343,7 +389,7 @@ public partial class App : System.Windows.Application
                 _settingsWindow.SettingsSaved += () =>
                 {
                     UpdateTrayMenu();
-                    _overlayWindow?.SetState("idle");
+                    SetAppState("idle");
                     // ホットキー設定が変更された可能性があるため、KeyboardHook のキャッシュを更新する
                     _keyboardHook.RefreshHoldKey();
                 };
@@ -363,7 +409,7 @@ public partial class App : System.Windows.Application
                 _setupWindow.SettingsSaved += () =>
                 {
                     UpdateTrayMenu();
-                    _overlayWindow?.SetState("idle");
+                    SetAppState("idle");
                     // ホットキー設定が変更された可能性があるため、KeyboardHook のキャッシュを更新する
                     _keyboardHook.RefreshHoldKey();
                 };
@@ -405,6 +451,9 @@ public partial class App : System.Windows.Application
                 _notifyIcon.Visible = false;
                 _notifyIcon.Dispose();
             }
+
+            // 状態別にキャッシュしたトレイアイコンをまとめて破棄する (Ui/TrayIcons.cs 参照)。
+            TrayIcons.DisposeAll();
 
             // 自分が所有している (=作成した) Mutex のみ解放する。
             // 二重起動時は createdNew=false であり、所有していない Mutex に対して
