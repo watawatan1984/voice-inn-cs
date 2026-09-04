@@ -22,6 +22,27 @@ public class HistoryItem
 
     [JsonPropertyName("error")]
     public string? Error { get; set; }
+
+    /// <summary>
+    /// Text が空 (＝文字起こし失敗) の行かどうか。UI 表示専用の導出プロパティであり、
+    /// history.json のスキーマを変えないよう JSON へは出力しない。
+    /// </summary>
+    [JsonIgnore]
+    public bool IsError => string.IsNullOrEmpty(Text);
+
+    /// <summary>
+    /// 履歴一覧の「種別」列に表示する文字列。Text があれば "Text"、無ければ "Error"。
+    /// </summary>
+    [JsonIgnore]
+    public string Kind => IsError ? "Error" : "Text";
+
+    /// <summary>
+    /// 履歴一覧の本文列・コピー時に使う表示用テキスト。
+    /// Text が空の場合は Error の内容を代わりに表示する (空白行のまま失敗理由が
+    /// わからなくなるのを防ぐ)。
+    /// </summary>
+    [JsonIgnore]
+    public string DisplayText => IsError ? (Error ?? string.Empty) : Text;
 }
 
 public class HistoryPayload
@@ -124,9 +145,44 @@ public class HistoryManager
             items = items.GetRange(0, MaxItems);
         }
 
-        // File.WriteAllText による直接上書きは非アトミックで、書き込み中のクラッシュや
-        // 電源断でファイルが壊れうる。一時ファイルへ書いてからアトミックに置換することで、
-        // 書き込みが失敗しても既存の history.json を壊さないようにする。
+        SaveItems(items);
+    }
+
+    /// <summary>
+    /// 指定した Id の履歴項目を1件削除する。該当する項目が無い場合は何もしない。
+    /// </summary>
+    public void DeleteItem(string id)
+    {
+        if (string.IsNullOrEmpty(id))
+        {
+            return;
+        }
+
+        var items = LoadItems();
+        int removed = items.RemoveAll(i => i.Id == id);
+        if (removed > 0)
+        {
+            SaveItems(items);
+        }
+    }
+
+    /// <summary>
+    /// 履歴をすべて削除する。取り返しがつかない操作のため、呼び出し側 (UI) で
+    /// 実行前に必ず確認を取ること。
+    /// </summary>
+    public void ClearAll()
+    {
+        SaveItems([]);
+    }
+
+    /// <summary>
+    /// 履歴一覧を history.json へ書き込む共通経路。AppendItem / DeleteItem / ClearAll は
+    /// すべてここを通ることで、一時ファイル経由のアトミック置換 (File.Move による overwrite)
+    /// を共有する。書き込み中のクラッシュや電源断で history.json 自体が壊れないようにするため、
+    /// File.WriteAllText で直接上書きすることは絶対にしない。
+    /// </summary>
+    private void SaveItems(List<HistoryItem> items)
+    {
         string tempPath = _historyPath + $".tmp{Guid.NewGuid():N}";
         try
         {
