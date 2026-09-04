@@ -6,7 +6,7 @@
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D6?style=for-the-badge&logo=windows&logoColor=white)
 ![Language](https://img.shields.io/badge/Language-C%23%2013-239120?style=for-the-badge&logo=csharp&logoColor=white)
 ![Framework](https://img.shields.io/badge/UI-WPF%20%2B%20Win32-00599C?style=for-the-badge)
-![Tests](https://img.shields.io/badge/Tests-100%20Passed-brightgreen?style=for-the-badge)
+![Tests](https://img.shields.io/badge/Tests-125%20Passed-brightgreen?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)
 
 ### **あなたの声を、あらゆる場所でスマートにテキスト化。**
@@ -134,7 +134,7 @@
 | **低レイヤ制御** | **Win32 API (P/Invoke)** | Windows 10/11 | `SetWindowsHookEx` (キー監視), `keybd_event` (キーストローク), `GetForegroundWindow` (ウィンドウ検知)。 |
 | **外部 AI** | **Google Gemini REST API** | v1beta | 音声データを直接インラインでマルチモーダル推論でき、超低レイテンシで高品質。 |
 | **外部 AI** | **Groq Cloud API** | OpenAI 互換 | LPU による圧倒的な推論速度（Whisper & LLaMA 3.3）。 |
-| **テスト** | **xUnit + FluentAssertions** | 2.9.3 | .NET の標準的テストフレームワーク。モック不要な純粋関数設計により 100 件の単体テストを瞬時実行。 |
+| **テスト** | **xUnit** | 2.9.3 | .NET の標準的テストフレームワーク。モック不要な純粋関数設計により 125 件の単体テストを瞬時実行。 |
 
 ---
 
@@ -194,7 +194,7 @@ flowchart TB
 
 ## 💎 設計・実装のこだわり (Engineering Highlights)
 
-### 1. 純粋関数へのロジック分離と単体テスト 100 件完備
+### 1. 純粋関数へのロジック分離と単体テスト 125 件完備
 NAudio のイベントハンドラに埋もれていたゲイン計算（dB→線形倍率変換）および RMS / Peak 集計処理を、副作用のない静的クラス `AudioSampleProcessor` へ完全に抽出。
 ハードウェアやマイクデバイスに依存しないため、クリッピング挙動、ゼロ除算防止、奇数バイト長の入力ガードなど、**100 パターンの単体テスト** を xUnit で網羅し、品質を数学的に保証しています。
 
@@ -281,6 +281,26 @@ Copy-Item .env.example .env
 ```
 
 ### 3. 環境変数 (.env) の設定
+
+`.env` には API キーを書き込むため、**どこに置くか（＝同じ PC の他のアカウントから読めてしまわないか）が重要**です。`EnvLoader` は起動時に次の順で `.env` を探し、最初に見つかったものを読み込みます（この探索順は互換性のため今後も変更しません）。
+
+| 優先順位 | パス | 位置づけ | 安全性 |
+| :--- | :--- | :--- | :--- |
+| 1 | 実行ファイルと同じディレクトリ | 開発時のクイックスタート / ポータブルモード用のフォールバック | ⚠️ `Program Files` や `C:\` 直下など複数ユーザーが共有するインストール先に置いた場合、既定の NTFS 権限では**同じ PC の他のローカルアカウントからも読み取れます**。個人 PC の単一ユーザー利用以外では避けてください。 |
+| 2 | カレントディレクトリ | ショートカットの「作業フォルダ」設定に依存する後方互換用 | 上記と同様の注意が必要です。 |
+| 3 | `%AppData%\VoiceIn\.env` | **推奨（第一候補）** | ✅ Windows のユーザープロファイル配下のため、既定の権限では**同じ PC の他のアカウントから読み取れません**。共有 PC でも安全に使えます。 |
+
+**推奨手順**: どの環境であっても、API キー漏えいのリスクを避けるため `%AppData%\VoiceIn\.env` への配置を推奨します。
+
+```powershell
+# %AppData%\VoiceIn フォルダを作成し、.env を配置
+New-Item -ItemType Directory -Force "$env:AppData\VoiceIn" | Out-Null
+Copy-Item .env.example "$env:AppData\VoiceIn\.env"
+notepad "$env:AppData\VoiceIn\.env"
+```
+
+開発時にリポジトリ直下で素早く試したいだけの場合は、手順2で作成した実行ファイル隣接の `.env` をそのまま使っても動作します。ただし共有 PC・複数ユーザーが使うインストール先では、上表の理由により `%AppData%\VoiceIn\.env` へ移すことを強く推奨します。
+
 テキストエディタで `.env` を開き、お持ちの API キーを設定します（どちらか一方のみでも動作します）。
 
 ```ini
@@ -295,10 +315,23 @@ GROQ_API_KEY=gsk_...
 AI_PROVIDER=gemini
 ```
 
-### 4. ビルドとテスト
+### 4. ポータブルモード (`VOICEIN_PORTABLE`)
+
+USB メモリなどに入れて複数の PC に持ち運びたい場合、環境変数 `VOICEIN_PORTABLE` を `1` に設定すると、設定 (`settings.json`)・履歴 (`history.json`)・ログ (`app.log`)・`.env` の保存先がすべて `%AppData%\VoiceIn` の代わりに**実行ファイルと同じディレクトリ**になります（移植元 Python 版の `VOICEIN_PORTABLE=1`（`src/core/utils.py` の `get_config_dir` / `get_state_dir`）と同じ仕様です）。
 
 ```powershell
-# テストの実行 (100件のテストがパスすることを確認)
+# 実行ファイルと同じフォルダにすべてのデータを保存して起動する例
+$env:VOICEIN_PORTABLE = "1"
+.\VoiceIn.exe
+```
+
+- 値がちょうど `1` の場合のみポータブルモードになります。未設定・`0`・その他の値では従来どおり `%AppData%\VoiceIn` を使用し、既存ユーザーの挙動・データには一切影響しません。
+- ポータブルモードで実行ファイルの隣に置く `.env` にも、上表の「共有 PC 上で他アカウントから読める」リスクがそのまま当てはまります。持ち運ぶ USB メモリ自体の紛失・盗難にも注意してください。
+
+### 5. ビルドとテスト
+
+```powershell
+# テストの実行 (125件のテストがパスすることを確認)
 dotnet test
 
 # アプリケーションのビルド & 実行

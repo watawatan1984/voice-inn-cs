@@ -67,6 +67,23 @@ public partial class App : System.Windows.Application
         // 環境変数読み込み (.env)
         EnvLoader.Load();
 
+        // 起動時クリーンアップ: 前回までのクラッシュ・強制終了・電源断で消せなかった
+        // 古い一時 WAV ファイル (%TEMP%\voicein_*.wav、ユーザーの生の音声データを含む) を
+        // バックグラウンドで削除する。起動処理を遅延させないよう Task.Run で非同期に行い、
+        // 失敗しても起動を止めないよう例外はログに残すのみに留める
+        // (CleanupStaleTempFiles 自体もファイル単位で例外を握りつぶすが、念のため二重に保護する)。
+        Task.Run(() =>
+        {
+            try
+            {
+                AudioRecorder.CleanupStaleTempFiles();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("起動時の一時 WAV ファイルクリーンアップに失敗しました", ex);
+            }
+        });
+
         // オーバーレイUIの表示
         _overlayWindow = new OverlayWindow();
         _overlayWindow.SettingsRequested += OpenSettings;

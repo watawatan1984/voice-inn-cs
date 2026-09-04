@@ -12,6 +12,35 @@ public static class EnvLoader
     /// </summary>
     public static string? LoadedFilePath { get; private set; }
 
+    /// <summary>
+    /// ポータブルモードかどうかを判定する。環境変数 VOICEIN_PORTABLE の値がちょうど "1" の
+    /// ときのみ true を返す (移植元 Python 版 src/core/utils.py の get_config_dir/get_state_dir
+    /// と同じ判定基準)。未設定・"0"・"true" 等それ以外の値はすべて false (=通常モード) となり、
+    /// 既定の挙動は変わらない。
+    /// </summary>
+    internal static bool IsPortableMode() =>
+        Environment.GetEnvironmentVariable("VOICEIN_PORTABLE") == "1";
+
+    /// <summary>
+    /// 設定 (settings.json) ・履歴 (history.json) ・ログ (app.log) ・.env の保存先ディレクトリを
+    /// 返す共通ヘルパー。SettingsManager / HistoryManager / Logger / EnvLoader (本クラス自身の
+    /// GetWritableFilePath) はすべてこのメソッド経由でディレクトリを決定すること。
+    /// 同じ判定を複数箇所へ個別にコピーしないため、ここに一元化している。
+    ///
+    /// ・ポータブルモード (IsPortableMode() が true) のときは実行ファイルと同じディレクトリ
+    ///   (AppDomain.CurrentDomain.BaseDirectory) を返す。
+    /// ・それ以外 (既定・環境変数未設定時) は、従来と全く同じ %AppData%\VoiceIn を返す。
+    ///   既存ユーザーのデータ (settings.json / history.json / .env) はそのまま読まれ続ける。
+    ///
+    /// ディレクトリの作成 (Directory.CreateDirectory) はしない。呼び出し側の責務とする。
+    /// </summary>
+    internal static string GetAppDataDirectory()
+    {
+        return IsPortableMode()
+            ? AppDomain.CurrentDomain.BaseDirectory
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VoiceIn");
+    }
+
     public static void Load(string? customPath = null)
     {
         string[] candidatePaths = customPath != null
@@ -36,13 +65,14 @@ public static class EnvLoader
     /// <summary>
     /// .env への書き戻し先パスを返す。Load() で実際に読み込んだファイルがあればそのパス、
     /// どの候補にも .env が存在せず読み込みが行われなかった場合は、新規作成先として
-    /// %AppData%\VoiceIn\.env (Environment.SpecialFolder.ApplicationData 配下、
-    /// ユーザー単位で保護される場所) を返す。
+    /// GetAppDataDirectory()\.env を返す。
+    /// ・通常モード (既定): %AppData%\VoiceIn\.env (Environment.SpecialFolder.ApplicationData 配下、
+    ///   ユーザー単位で保護される場所)。
+    /// ・ポータブルモード (VOICEIN_PORTABLE=1): 実行ファイルと同じディレクトリ\.env。
     /// </summary>
     public static string GetWritableFilePath()
     {
-        return LoadedFilePath ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VoiceIn", ".env");
+        return LoadedFilePath ?? Path.Combine(GetAppDataDirectory(), ".env");
     }
 
     /// <summary>

@@ -20,7 +20,10 @@ public class SettingsManager
 
     private SettingsManager()
     {
-        string baseDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VoiceIn");
+        // 保存先ディレクトリの決定は EnvLoader.GetAppDataDirectory() に一元化している。
+        // 既定 (VOICEIN_PORTABLE 未設定) では従来と全く同じ %AppData%\VoiceIn を返すため、
+        // 既存ユーザーの settings.json はそのまま読まれ続ける。
+        string baseDir = EnvLoader.GetAppDataDirectory();
         Directory.CreateDirectory(baseDir);
         _settingsPath = Path.Combine(baseDir, "settings.json");
 

@@ -29,8 +29,10 @@ public static class Logger
 
     private static readonly object _lock = new();
 
-    private static readonly string _logDirectory = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VoiceIn");
+    // 保存先ディレクトリの決定は EnvLoader.GetAppDataDirectory() に一元化している。
+    // 既定 (VOICEIN_PORTABLE 未設定) では従来と全く同じ %AppData%\VoiceIn を返すため、
+    // 既存ユーザーの app.log はそのまま同じ場所に追記され続ける。
+    private static readonly string _logDirectory = EnvLoader.GetAppDataDirectory();
 
     private static readonly string _logFilePath = Path.Combine(_logDirectory, "app.log");
 

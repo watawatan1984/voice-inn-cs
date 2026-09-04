@@ -261,6 +261,65 @@ public class AudioRecorder : IDisposable
         }
     }
 
+    /// <summary>
+    /// %TEMP% に残った古い一時 WAV ファイル (voicein_*.wav) を削除する。
+    ///
+    /// 通常は Start()/Cleanup() が録音のたびに自分の一時ファイルを削除するが、
+    /// プロセスのクラッシュ・強制終了・電源断ではこの後片付けが実行されず、
+    /// ユーザーの生の音声データを含む WAV が %TEMP% に残り続けてしまう。
+    /// App.xaml.cs の起動処理から呼び出し、そうした残骸を掃除する。
+    ///
+    /// ・「古い」の判定は最終更新時刻で行う。実行中の自分自身がちょうど書き込み中の
+    ///   ファイルを誤って消さないよう、minAge (既定 1 時間) 以上前に更新されたものだけを
+    ///   対象にする。録音は長くても数分で終わるため、1 時間の猶予があれば実行中の
+    ///   ファイルと衝突することはない。
+    /// ・ファイル名は Start() が生成する "voicein_{GUID}.wav" と同じパターン
+    ///   ("voicein_*.wav") のみを対象にする。無関係なファイルには触れない。
+    /// ・1 件の削除に失敗しても (他プロセスが使用中、権限不足等)、残りのファイルの
+    ///   削除は継続する。呼び出し元 (App.xaml.cs) はこのメソッド自体が例外を投げないことを
+    ///   前提にできる。
+    /// </summary>
+    /// <param name="tempDirectory">
+    /// 掃除対象のディレクトリ。既定 (null) では Path.GetTempPath() (%TEMP%) を使う。
+    /// テストから実際の %TEMP% を汚染せずに検証できるよう、差し替え可能にしている。
+    /// </param>
+    /// <param name="minAge">これより新しいファイルは削除しない。既定は 1 時間。</param>
+    internal static void CleanupStaleTempFiles(string? tempDirectory = null, TimeSpan? minAge = null)
+    {
+        string directory = tempDirectory ?? Path.GetTempPath();
+        TimeSpan threshold = minAge ?? TimeSpan.FromHours(1);
+
+        string[] candidates;
+        try
+        {
+            candidates = Directory.GetFiles(directory, "voicein_*.wav");
+        }
+        catch
+        {
+            // ディレクトリが存在しない・列挙に失敗した場合もベストエフォートで諦める
+            // (起動処理を止めないことを優先する)。
+            return;
+        }
+
+        DateTime cutoffUtc = DateTime.UtcNow - threshold;
+
+        foreach (var path in candidates)
+        {
+            try
+            {
+                if (File.GetLastWriteTimeUtc(path) < cutoffUtc)
+                {
+                    File.Delete(path);
+                }
+            }
+            catch
+            {
+                // 他プロセスが使用中・権限不足などで 1 件の削除に失敗しても、
+                // 残りのファイルの掃除を継続する。
+            }
+        }
+    }
+
     public void Dispose()
     {
         Cleanup();
