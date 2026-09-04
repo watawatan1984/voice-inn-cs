@@ -291,8 +291,8 @@ public partial class SettingsWindow : Window
         // 辞書
         // バックグラウンドスレッドでの辞書置換処理 (App.OnKeyReleased) と競合し、
         // "Collection was modified" 例外や置換結果の消失が起きないよう、
-        // App 側と同じロック (App.DictionaryLock) の下で更新する。
-        lock (VoiceIn.App.DictionaryLock)
+        // App 側と同じロック (SettingsLock.Gate) の下で更新する。
+        lock (SettingsLock.Gate)
         {
             settings.Dictionary.Clear();
             foreach (var entry in _dictEntries)
@@ -313,18 +313,17 @@ public partial class SettingsWindow : Window
             CaptureCurrentCategoryEdits(_currentCategoryKey);
         }
 
-        // settings.AppCategories / settings.CategoryPrompts は、バックグラウンドスレッドから
-        // ロックなしで読まれている (Core.WindowDetector.DetectCategory が AppCategories を、
+        // settings.AppCategories / settings.CategoryPrompts は、バックグラウンドスレッドからも
+        // 読まれている (Core.WindowDetector.DetectCategory が AppCategories を、
         // App.xaml.cs の Task.Run 内が CategoryPrompts.TryGetValue を参照する)。
-        // 既存の Dictionary (単語置換辞書) と同じ App.DictionaryLock を流用して保護しつつ、
+        // どちらの読み取り側も SettingsLock.Gate を取ってから参照するようになっているため、
+        // 既存の Dictionary (単語置換辞書) と同じ SettingsLock.Gate を流用して保護しつつ、
         // ロックの外で新しい Dictionary/List を先に組み立てておき、ロック内では
         // settings 側のプロパティへの参照差し替えのみを行うことで、書き換え自体を
         // 一括・最短時間にする。既存インスタンスを Clear/Add で書き換えるのではなく
         // 新しいインスタンスに丸ごと差し替えるため、差し替え中に読み取り側が既に
         // 列挙を開始していた場合でも (差し替え前の) 古いインスタンスをそのまま
         // 列挙し続けるだけで済み、「コレクションが変更されました」例外にはならない。
-        // ただし読み取り側 (WindowDetector / App.xaml.cs) は編集対象外のためロックしておらず、
-        // この対応だけで競合を完全には排除できない点に注意 (詳細はレポート参照)。
         var newAppCategories = new Dictionary<string, List<string>>();
         foreach (var (cat, keywords) in _categoryKeywordsWorking)
         {
@@ -332,7 +331,7 @@ public partial class SettingsWindow : Window
         }
         var newCategoryPrompts = new Dictionary<string, string>(_categoryPromptsWorking);
 
-        lock (VoiceIn.App.DictionaryLock)
+        lock (SettingsLock.Gate)
         {
             settings.AppCategories = newAppCategories;
             settings.CategoryPrompts = newCategoryPrompts;

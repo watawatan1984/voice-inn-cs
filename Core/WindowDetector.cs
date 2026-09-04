@@ -68,7 +68,19 @@ public static class WindowDetector
 
         string text = $"{info.ProcessName} {info.Title}".ToLowerInvariant();
 
-        foreach (var (cat, keywords) in settings.AppCategories)
+        // settings.AppCategories は設定画面での保存処理 (Ui/SettingsWindow.OnSaveAndApply) から
+        // バックグラウンドスレッドで参照ごと差し替えられうるため、SettingsLock.Gate の下で
+        // 列挙用のスナップショット (KeyValuePair の配列) を取ってから即座にロックを抜ける。
+        // ロック内で行うのは列挙とその場でのコピーのみで、キーワード照合 (ロック不要な
+        // 純粋な文字列比較) はロックの外で行う。これにより、保存処理の前後で新旧の
+        // AppCategories が混在して読まれることを防ぎつつ、ロックの保持時間も最短にする。
+        KeyValuePair<string, List<string>>[] categoriesSnapshot;
+        lock (SettingsLock.Gate)
+        {
+            categoriesSnapshot = settings.AppCategories.ToArray();
+        }
+
+        foreach (var (cat, keywords) in categoriesSnapshot)
         {
             if (cat == "STD") continue;
 

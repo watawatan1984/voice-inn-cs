@@ -14,14 +14,9 @@ namespace VoiceIn;
 
 public partial class App : System.Windows.Application
 {
-    /// <summary>
-    /// settings.Dictionary (辞書置換ルール) への同時アクセスを保護するロック。
-    /// バックグラウンドスレッドでの辞書置換処理 (本クラス) と、
-    /// 設定画面での保存処理 (Ui/SettingsWindow.OnSaveAndApply) が同時に走ることで
-    /// 発生する InvalidOperationException (コレクション変更) を防ぐため、
-    /// 両方が同じロックオブジェクトを使用する。
-    /// </summary>
-    internal static readonly object DictionaryLock = new();
+    // settings.Dictionary / AppCategories / CategoryPrompts への同時アクセスを保護するロックは
+    // Core.SettingsLock.Gate に集約している (Core 層である WindowDetector からも参照するため、
+    // UI 層である本クラスに置くと依存関係が逆転してしまう)。詳細は Core/SettingsLock.cs 参照。
 
     private Mutex? _mutex;
     private bool _mutexOwned;
@@ -322,17 +317,25 @@ public partial class App : System.Windows.Application
                 string promptText;
                 string currentProvider = SettingsManager.Instance.CurrentProvider.ToLowerInvariant();
 
-                if (currentProvider == "groq")
+                // settings.CategoryPrompts は設定画面での保存処理 (Ui/SettingsWindow.OnSaveAndApply)
+                // からバックグラウンドスレッドで参照ごと差し替えられうるため、SettingsLock.Gate の下で
+                // TryGetValue とその結果の利用 (ternary) までをまとめて行う。ロック内で行うのは
+                // 辞書からの値取得と短い文字列整形のみで、この後に続くネットワーク I/O
+                // (provider.TranscribeAsync) や await はロックの外で行う。
+                lock (SettingsLock.Gate)
                 {
-                    promptText = useCategoryPrompt && settings.CategoryPrompts.TryGetValue(category, out var catPrompt)
-                        ? catPrompt
-                        : settings.Prompts.GroqRefineSystemPrompt;
-                }
-                else
-                {
-                    promptText = useCategoryPrompt && settings.CategoryPrompts.TryGetValue(category, out var catPrompt)
-                        ? $"{settings.Prompts.GeminiTranscribePrompt}\n\n【追加コンテキスト指示 ({category})】\n{catPrompt}"
-                        : settings.Prompts.GeminiTranscribePrompt;
+                    if (currentProvider == "groq")
+                    {
+                        promptText = useCategoryPrompt && settings.CategoryPrompts.TryGetValue(category, out var catPrompt)
+                            ? catPrompt
+                            : settings.Prompts.GroqRefineSystemPrompt;
+                    }
+                    else
+                    {
+                        promptText = useCategoryPrompt && settings.CategoryPrompts.TryGetValue(category, out var catPrompt)
+                            ? $"{settings.Prompts.GeminiTranscribePrompt}\n\n【追加コンテキスト指示 ({category})】\n{catPrompt}"
+                            : settings.Prompts.GeminiTranscribePrompt;
+                    }
                 }
 
                 var provider = AiProviderFactory.CreateProvider(currentProvider);
@@ -340,12 +343,12 @@ public partial class App : System.Windows.Application
 
                 // 辞書置換
                 // ・置換中に設定画面側で Dictionary が変更されても影響を受けないよう、
-                //   DictionaryLock (Ui/SettingsWindow.OnSaveAndApply と共有) の下でスナップショットを取る。
+                //   SettingsLock.Gate (Ui/SettingsWindow.OnSaveAndApply と共有) の下でスナップショットを取る。
                 // ・Dictionary の列挙順序は保証されない (string.GetHashCode がプロセスごとに
                 //   ランダム化されるため) ので、キー文字列長の降順に明示ソートしてから適用し、
                 //   部分文字列衝突による連鎖置換や起動ごとの結果ぶれを防ぐ。
                 KeyValuePair<string, string>[] dictSnapshot;
-                lock (DictionaryLock)
+                lock (SettingsLock.Gate)
                 {
                     dictSnapshot = settings.Dictionary
                         .OrderByDescending(kv => kv.Key.Length)
