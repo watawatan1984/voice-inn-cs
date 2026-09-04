@@ -51,20 +51,49 @@ public class HistoryManager
 
     public List<HistoryItem> LoadItems()
     {
+        if (!File.Exists(_historyPath))
+        {
+            return [];
+        }
+
         try
         {
-            if (!File.Exists(_historyPath))
-            {
-                return [];
-            }
-
             string json = File.ReadAllText(_historyPath);
             var payload = JsonSerializer.Deserialize<HistoryPayload>(json);
             return payload?.Items ?? [];
         }
         catch
         {
+            // 壊れたファイルを黙って空リストで上書きすると過去の履歴が警告なく全消失するため、
+            // 読み込みに失敗したファイルは退避 (リネーム) してから空リストにフォールバックする。
+            // 退避自体が失敗しても、履歴読み込みの失敗を外へ伝播させない (ベストエフォート)。
+            QuarantineCorruptFile();
             return [];
+        }
+    }
+
+    private void QuarantineCorruptFile()
+    {
+        try
+        {
+            if (!File.Exists(_historyPath))
+            {
+                return;
+            }
+
+            string? dir = Path.GetDirectoryName(_historyPath);
+            string quarantinePath = Path.Combine(
+                string.IsNullOrEmpty(dir) ? Path.GetTempPath() : dir,
+                $"history.corrupt-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}.json");
+
+            // Move (Copy ではない) することで、壊れたファイルを元の場所から確実に取り除く。
+            // これにより、以後 LoadItems() が呼ばれるたびに同じ壊れたファイルを何度も
+            // 退避してしまう (quarantine ファイルが積み重なる) のを防ぐ。
+            File.Move(_historyPath, quarantinePath);
+        }
+        catch
+        {
+            // ベストエフォート: 退避の失敗はテスト結果や本処理に影響させない。
         }
     }
 
@@ -95,15 +124,21 @@ public class HistoryManager
             items = items.GetRange(0, MaxItems);
         }
 
+        // File.WriteAllText による直接上書きは非アトミックで、書き込み中のクラッシュや
+        // 電源断でファイルが壊れうる。一時ファイルへ書いてからアトミックに置換することで、
+        // 書き込みが失敗しても既存の history.json を壊さないようにする。
+        string tempPath = _historyPath + $".tmp{Guid.NewGuid():N}";
         try
         {
             var payload = new HistoryPayload { Version = 1, Items = items };
             string json = JsonSerializer.Serialize(payload, _jsonOptions);
-            File.WriteAllText(_historyPath, json);
+            File.WriteAllText(tempPath, json);
+            File.Move(tempPath, _historyPath, overwrite: true);
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Failed to save history: {ex.Message}");
+            try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
         }
     }
 }

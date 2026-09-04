@@ -63,6 +63,29 @@ public class SettingsManager
     public string CurrentProvider
     {
         get => Environment.GetEnvironmentVariable("AI_PROVIDER") ?? "gemini";
-        set => Environment.SetEnvironmentVariable("AI_PROVIDER", value);
+        set
+        {
+            Environment.SetEnvironmentVariable("AI_PROVIDER", value);
+
+            // トレイメニュー/設定画面でのプロバイダ切り替えが次回起動後も保持されるよう、
+            // .env にも書き戻す。書き戻しに失敗しても (ファイル権限など)、実行時の
+            // 切り替え自体 (上の SetEnvironmentVariable) は継続させる。
+            EnvLoader.TryWriteKey("AI_PROVIDER", value);
+        }
+    }
+
+    /// <summary>
+    /// GEMINI_MODEL を環境変数と .env の両方へ永続化する。CurrentProvider セッターと
+    /// 同じ仕組み (EnvLoader.TryWriteKey) を使い、次回起動後もモデル設定を保持する。
+    /// </summary>
+    public void PersistGeminiModel(string model)
+    {
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            return;
+        }
+
+        Environment.SetEnvironmentVariable("GEMINI_MODEL", model);
+        EnvLoader.TryWriteKey("GEMINI_MODEL", model);
     }
 }

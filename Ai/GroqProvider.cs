@@ -12,7 +12,11 @@ namespace VoiceIn.Ai;
 public class GroqProvider : IAiProvider
 {
     public string ProviderName => "groq";
-    private readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(60) };
+
+    // 発話のたびに AiProviderFactory.CreateProvider() が呼ばれ Provider インスタンスが
+    // 都度生成されるため、HttpClient はインスタンスフィールドではなく static で
+    // プロセス全体で使い回す（毎回 new すると常駐アプリでソケット枯渇に至るため）。
+    private static readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(60) };
 
     public async Task<string> TranscribeAsync(string audioFilePath, string prompt)
     {
@@ -64,7 +68,9 @@ public class GroqProvider : IAiProvider
 
         if (!response.IsSuccessStatusCode)
         {
-            throw new HttpRequestException($"Groq Whisper エラー ({(int)response.StatusCode}): {result}");
+            // 例外メッセージは App.xaml.cs 経由で history.json に平文保存され、バルーン通知にも
+            // 表示される。API レスポンス本文を無制限に含めないよう、先頭 500 文字程度に切り詰める。
+            throw new HttpRequestException($"Groq Whisper エラー ({(int)response.StatusCode}): {TruncateForError(result)}");
         }
 
         return result.Trim();
@@ -94,7 +100,9 @@ public class GroqProvider : IAiProvider
 
         if (!response.IsSuccessStatusCode)
         {
-            throw new HttpRequestException($"Groq Refine エラー ({(int)response.StatusCode}): {result}");
+            // 例外メッセージは App.xaml.cs 経由で history.json に平文保存され、バルーン通知にも
+            // 表示される。API レスポンス本文を無制限に含めないよう、先頭 500 文字程度に切り詰める。
+            throw new HttpRequestException($"Groq Refine エラー ({(int)response.StatusCode}): {TruncateForError(result)}");
         }
 
         using var doc = JsonDocument.Parse(result);
@@ -109,5 +117,19 @@ public class GroqProvider : IAiProvider
         }
 
         return rawText;
+    }
+
+    /// <summary>
+    /// 例外メッセージに載せる API レスポンス本文を先頭 maxLength 文字に切り詰める。
+    /// ステータスコードは呼び出し側で別途メッセージに含めているため、ここでは本文のみを扱う。
+    /// </summary>
+    private static string TruncateForError(string text, int maxLength = 500)
+    {
+        if (string.IsNullOrEmpty(text) || text.Length <= maxLength)
+        {
+            return text;
+        }
+
+        return text[..maxLength] + "…(以下省略)";
     }
 }

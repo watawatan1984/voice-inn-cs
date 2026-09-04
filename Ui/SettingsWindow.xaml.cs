@@ -135,12 +135,18 @@ public partial class SettingsWindow : Window
         settings.Prompts.GroqRefineSystemPrompt = TxtGroqRefinePrompt.Text;
 
         // 辞書
-        settings.Dictionary.Clear();
-        foreach (var entry in _dictEntries)
+        // バックグラウンドスレッドでの辞書置換処理 (App.OnKeyReleased) と競合し、
+        // "Collection was modified" 例外や置換結果の消失が起きないよう、
+        // App 側と同じロック (App.DictionaryLock) の下で更新する。
+        lock (VoiceIn.App.DictionaryLock)
         {
-            if (!string.IsNullOrWhiteSpace(entry.From))
+            settings.Dictionary.Clear();
+            foreach (var entry in _dictEntries)
             {
-                settings.Dictionary[entry.From.Trim()] = entry.To ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(entry.From))
+                {
+                    settings.Dictionary[entry.From.Trim()] = entry.To ?? string.Empty;
+                }
             }
         }
 

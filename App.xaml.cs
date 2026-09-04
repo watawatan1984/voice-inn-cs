@@ -14,7 +14,17 @@ namespace VoiceIn;
 
 public partial class App : System.Windows.Application
 {
+    /// <summary>
+    /// settings.Dictionary (辞書置換ルール) への同時アクセスを保護するロック。
+    /// バックグラウンドスレッドでの辞書置換処理 (本クラス) と、
+    /// 設定画面での保存処理 (Ui/SettingsWindow.OnSaveAndApply) が同時に走ることで
+    /// 発生する InvalidOperationException (コレクション変更) を防ぐため、
+    /// 両方が同じロックオブジェクトを使用する。
+    /// </summary>
+    internal static readonly object DictionaryLock = new();
+
     private Mutex? _mutex;
+    private bool _mutexOwned;
     private Forms.NotifyIcon? _notifyIcon;
     private OverlayWindow? _overlayWindow;
     private SettingsWindow? _settingsWindow;
@@ -24,7 +34,10 @@ public partial class App : System.Windows.Application
     private readonly AudioRecorder _audioRecorder = new();
 
     private WindowInfo? _targetWindow;
-    private bool _isProcessing = false;
+
+    // OnKeyPressed/OnKeyReleased (UIスレッド) と Task.Run 内の finally (スレッドプールスレッド) の
+    // 両方から読み書きされるため、volatile でスレッド間のメモリ可視性を保証する。
+    private volatile bool _isProcessing = false;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -32,6 +45,7 @@ public partial class App : System.Windows.Application
 
         // 二重起動防止
         _mutex = new Mutex(true, "VoiceIn_Application_SingleInstance_Mutex", out bool createdNew);
+        _mutexOwned = createdNew;
         if (!createdNew)
         {
             MessageBox.Show("Voice In は既に起動しています。", "Voice In", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -161,7 +175,22 @@ public partial class App : System.Windows.Application
 
     private void OnAutoStop()
     {
-        Dispatcher.Invoke(() => OnKeyReleased());
+        // スレッドプールのタイマスレッドから呼ばれるため、シャットダウン中/済みの
+        // Dispatcher に対して呼び出すと未処理例外でプロセスが落ちうる。事前チェックに加え、
+        // チェックと呼び出しの間の競合にも備えて try/catch で保護する。
+        if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+        {
+            return;
+        }
+
+        try
+        {
+            Dispatcher.Invoke(() => OnKeyReleased());
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"OnAutoStop の Dispatcher.Invoke に失敗しました: {ex.Message}");
+        }
     }
 
     private void OnKeyReleased()
@@ -195,18 +224,23 @@ public partial class App : System.Windows.Application
                     category = WindowDetector.DetectCategory(_targetWindow, settings);
                 }
 
+                // "STD" は「コンテキスト認識が無効」「該当カテゴリなし」のいずれでも返るため、
+                // ContextAwareEnabled が真かつ実際にカテゴリを検出できた場合のみ
+                // カテゴリ別プロンプトを使用する。それ以外は素のプロンプトをそのまま使う。
+                bool useCategoryPrompt = settings.ContextAwareEnabled && category != "STD";
+
                 string promptText;
                 string currentProvider = SettingsManager.Instance.CurrentProvider.ToLowerInvariant();
 
                 if (currentProvider == "groq")
                 {
-                    promptText = settings.CategoryPrompts.TryGetValue(category, out var catPrompt)
+                    promptText = useCategoryPrompt && settings.CategoryPrompts.TryGetValue(category, out var catPrompt)
                         ? catPrompt
                         : settings.Prompts.GroqRefineSystemPrompt;
                 }
                 else
                 {
-                    promptText = settings.CategoryPrompts.TryGetValue(category, out var catPrompt)
+                    promptText = useCategoryPrompt && settings.CategoryPrompts.TryGetValue(category, out var catPrompt)
                         ? $"{settings.Prompts.GeminiTranscribePrompt}\n\n【追加コンテキスト指示 ({category})】\n{catPrompt}"
                         : settings.Prompts.GeminiTranscribePrompt;
                 }
@@ -215,7 +249,21 @@ public partial class App : System.Windows.Application
                 string text = await provider.TranscribeAsync(wavPath, promptText);
 
                 // 辞書置換
-                foreach (var (k, v) in settings.Dictionary)
+                // ・置換中に設定画面側で Dictionary が変更されても影響を受けないよう、
+                //   DictionaryLock (Ui/SettingsWindow.OnSaveAndApply と共有) の下でスナップショットを取る。
+                // ・Dictionary の列挙順序は保証されない (string.GetHashCode がプロセスごとに
+                //   ランダム化されるため) ので、キー文字列長の降順に明示ソートしてから適用し、
+                //   部分文字列衝突による連鎖置換や起動ごとの結果ぶれを防ぐ。
+                KeyValuePair<string, string>[] dictSnapshot;
+                lock (DictionaryLock)
+                {
+                    dictSnapshot = settings.Dictionary
+                        .OrderByDescending(kv => kv.Key.Length)
+                        .ThenBy(kv => kv.Key, StringComparer.Ordinal)
+                        .ToArray();
+                }
+
+                foreach (var (k, v) in dictSnapshot)
                 {
                     if (!string.IsNullOrEmpty(k))
                     {
@@ -232,7 +280,11 @@ public partial class App : System.Windows.Application
                 if (!string.IsNullOrWhiteSpace(text) && audioSettings.AutoPaste)
                 {
                     IntPtr hwnd = _targetWindow?.Hwnd ?? IntPtr.Zero;
-                    await TextPaster.PasteTextAsync(text, hwnd, audioSettings.PasteDelayMs);
+                    bool pasted = await TextPaster.PasteTextAsync(text, hwnd, audioSettings.PasteDelayMs);
+                    if (!pasted)
+                    {
+                        _notifyIcon?.ShowBalloonTip(2000, "Voice In", "自動貼り付けに失敗しました。変換結果は履歴から確認できます。", Forms.ToolTipIcon.Warning);
+                    }
                 }
 
                 ResetOverlayDelayed(1000);
@@ -256,7 +308,14 @@ public partial class App : System.Windows.Application
     {
         Task.Delay(ms).ContinueWith(_ =>
         {
-            _overlayWindow?.SetState("idle");
+            try
+            {
+                _overlayWindow?.SetState("idle");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"ResetOverlayDelayed の継続処理に失敗しました: {ex.Message}");
+            }
         });
     }
 
@@ -271,6 +330,8 @@ public partial class App : System.Windows.Application
                 {
                     UpdateTrayMenu();
                     _overlayWindow?.SetState("idle");
+                    // ホットキー設定が変更された可能性があるため、KeyboardHook のキャッシュを更新する
+                    _keyboardHook.RefreshHoldKey();
                 };
             }
             _settingsWindow.Show();
@@ -298,18 +359,35 @@ public partial class App : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
-        _keyboardHook.Dispose();
-        _audioRecorder.Dispose();
-
-        if (_notifyIcon != null)
+        // 後片付けの一部が失敗しても (例: 所有していない Mutex の解放など)
+        // シャットダウン自体は必ず継続させるため、OnExit 全体を try/catch で保護する。
+        try
         {
-            _notifyIcon.Visible = false;
-            _notifyIcon.Dispose();
+            _keyboardHook.Dispose();
+            _audioRecorder.Dispose();
+
+            if (_notifyIcon != null)
+            {
+                _notifyIcon.Visible = false;
+                _notifyIcon.Dispose();
+            }
+
+            // 自分が所有している (=作成した) Mutex のみ解放する。
+            // 二重起動時は createdNew=false であり、所有していない Mutex に対して
+            // ReleaseMutex() を呼ぶと ApplicationException が発生する。
+            if (_mutexOwned)
+            {
+                _mutex?.ReleaseMutex();
+            }
+            _mutex?.Dispose();
         }
-
-        _mutex?.ReleaseMutex();
-        _mutex?.Dispose();
-
-        base.OnExit(e);
+        catch (Exception ex)
+        {
+            Console.WriteLine($"OnExit のクリーンアップ処理に失敗しました: {ex.Message}");
+        }
+        finally
+        {
+            base.OnExit(e);
+        }
     }
 }
