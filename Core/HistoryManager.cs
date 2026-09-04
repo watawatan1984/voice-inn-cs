@@ -64,10 +64,28 @@ public class HistoryManager
     private static readonly JsonSerializerOptions _jsonOptions = new() { WriteIndented = true };
 
     private HistoryManager()
+        : this(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VoiceIn", "history.json"))
     {
-        string baseDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VoiceIn");
-        Directory.CreateDirectory(baseDir);
-        _historyPath = Path.Combine(baseDir, "history.json");
+    }
+
+    /// <summary>
+    /// テスト用: 履歴ファイルの保存先パスを指定してインスタンスを作成する。
+    /// Instance (シングルトン) はこのコンストラクタを private の既定コンストラクタ経由でのみ呼び出し、
+    /// %AppData%\VoiceIn\history.json を渡す。挙動は本コンストラクタへの委譲前とまったく同じ
+    /// (baseDir の作成 → history.json への結合) であり、Instance の動作は変えていない。
+    ///
+    /// このコンストラクタを internal で公開しているのは、テストから任意の一時ディレクトリを
+    /// 指定してインスタンスを作れるようにするため。テストは HistoryManager.Instance
+    /// (実ユーザーの %AppData%\VoiceIn を組み立ててしまう) には絶対に触れないこと。
+    /// </summary>
+    internal HistoryManager(string historyPath)
+    {
+        string? baseDir = Path.GetDirectoryName(historyPath);
+        if (!string.IsNullOrEmpty(baseDir))
+        {
+            Directory.CreateDirectory(baseDir);
+        }
+        _historyPath = historyPath;
     }
 
     public List<HistoryItem> LoadItems()
@@ -193,7 +211,9 @@ public class HistoryManager
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Failed to save history: {ex.Message}");
+            // 例外メッセージ (ex.Message) はファイル I/O 失敗の理由 (権限不足・パス不正等) であり、
+            // 履歴の本文 (items の Text/Error) は一切含まれない。プライバシー上安全にログ可能。
+            Logger.Error("Failed to save history", ex);
             try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
         }
     }
