@@ -77,6 +77,44 @@ public class PromptSettings
         """;
 }
 
+/// <summary>
+/// ローカル音声認識 (Whisper.net / whisper.cpp) の設定。
+/// 移植元 Python 版 (src/ai/providers/local.py, faster-whisper 使用) の
+/// local.model_size / local.device / local.compute_type に相当する設定を持つが、
+/// C# 版では Whisper.net の GPU 自動フォールバック機構を使うため device/compute_type は
+/// 持たず、代わりに UseGpu (bool) と ModelPath (明示パス) を持つ。
+/// </summary>
+public class LocalSettings
+{
+    /// <summary>
+    /// GGML モデルのサイズ。
+    /// 既定値を移植元と同じ "large-v3" ではなく "small" にしている理由:
+    /// large-v3 は約 3GB あり初回ダウンロードが重く、対象環境 (VRAM 4GB) では厳しい。
+    /// 押して話すツールとして待ち時間が実用的な範囲に収まる "small" (約 500MB) を既定とし、
+    /// 精度を優先したいユーザーは設定で large-v3 等へ変更できるようにする。
+    /// </summary>
+    [JsonPropertyName("model_size")]
+    public string ModelSize { get; set; } = "small";
+
+    /// <summary>CUDA を試みるか。false の場合は CPU 固定で動作する。</summary>
+    [JsonPropertyName("use_gpu")]
+    public bool UseGpu { get; set; } = true;
+
+    /// <summary>
+    /// true の場合、ローカルで文字起こしした生テキストをさらにクラウドの LLM で整形する
+    /// (ハイブリッドモード)。既定は移植元 Python 版と同じ「生の文字起こしのみ」(false)。
+    /// </summary>
+    [JsonPropertyName("refine_with_cloud")]
+    public bool RefineWithCloud { get; set; } = false;
+
+    /// <summary>
+    /// GGML モデルファイルの明示パス。null の場合は既定の保存先 (EnvLoader.GetAppDataDirectory()
+    /// 配下) から ModelSize に対応するファイルを探す。
+    /// </summary>
+    [JsonPropertyName("model_path")]
+    public string? ModelPath { get; set; } = null;
+}
+
 public class AppSettings
 {
     [JsonPropertyName("audio")]
@@ -87,6 +125,9 @@ public class AppSettings
 
     [JsonPropertyName("prompts")]
     public PromptSettings Prompts { get; set; } = new();
+
+    [JsonPropertyName("local")]
+    public LocalSettings Local { get; set; } = new();
 
     [JsonPropertyName("dictionary")]
     public Dictionary<string, string> Dictionary { get; set; } = [];

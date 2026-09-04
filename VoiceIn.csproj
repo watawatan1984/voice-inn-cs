@@ -11,6 +11,13 @@
 
   <ItemGroup>
     <PackageReference Include="NAudio" Version="3.0.1" />
+    <!-- ローカル音声認識 (whisper.cpp の .NET バインディング)。
+         NVIDIA GPU があれば CUDA、無ければ CPU へ自動フォールバックさせるため、
+         CPU ランタイムと CUDA (Windows) ランタイムの両方を参照する。
+         バージョンはレンジ指定にせず完全固定 (NAudio と同じ方針)。 -->
+    <PackageReference Include="Whisper.net" Version="1.9.1" />
+    <PackageReference Include="Whisper.net.Runtime" Version="1.9.1" />
+    <PackageReference Include="Whisper.net.Runtime.Cuda.Windows" Version="1.9.1" />
   </ItemGroup>
 
 </Project>

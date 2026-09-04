@@ -13,6 +13,7 @@ public static class AiProviderFactory
         return name switch
         {
             "groq" => new GroqProvider(),
+            "local" => new LocalProvider(),
             _ => new GeminiProvider()
         };
     }
