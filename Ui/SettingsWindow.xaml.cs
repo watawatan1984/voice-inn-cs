@@ -32,6 +32,12 @@ public partial class SettingsWindow : Window
         string curProvider = SettingsManager.Instance.CurrentProvider;
         CmbProvider.SelectedIndex = curProvider.ToLowerInvariant() == "groq" ? 1 : 0;
 
+        // Gemini API キー: 設定済みでも実際の値は表示せず、ステータス表示のみ行う
+        InitializeApiKeyField(PwdGeminiApiKey, TxtGeminiApiKeyVisible, LblGeminiApiKeyStatus, "GEMINI_API_KEY");
+
+        // Groq API キー: 同上
+        InitializeApiKeyField(PwdGroqApiKey, TxtGroqApiKeyVisible, LblGroqApiKeyStatus, "GROQ_API_KEY");
+
         // Geminiモデル
         TxtGeminiModel.Text = Environment.GetEnvironmentVariable("GEMINI_MODEL") ?? "gemini-2.5-flash";
 
@@ -97,10 +103,31 @@ public partial class SettingsWindow : Window
         string selectedProvider = (CmbProvider.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "gemini";
         SettingsManager.Instance.CurrentProvider = selectedProvider;
 
+        // Gemini API キー: 空欄のまま保存された場合は既存のキーを一切変更しない
+        // (マスクされた欄に何も入力しなかっただけでキーが消えてしまう事故を防ぐため)。
+        // 実際に新しい値が入力されたときのみ、環境変数への即時反映と .env への書き戻しを行う。
+        string geminiApiKeyInput = ReadApiKeyInput(PwdGeminiApiKey, TxtGeminiApiKeyVisible);
+        if (!string.IsNullOrEmpty(geminiApiKeyInput))
+        {
+            Environment.SetEnvironmentVariable("GEMINI_API_KEY", geminiApiKeyInput);
+            EnvLoader.TryWriteKey("GEMINI_API_KEY", geminiApiKeyInput);
+        }
+
+        // Groq API キー: 同上
+        string groqApiKeyInput = ReadApiKeyInput(PwdGroqApiKey, TxtGroqApiKeyVisible);
+        if (!string.IsNullOrEmpty(groqApiKeyInput))
+        {
+            Environment.SetEnvironmentVariable("GROQ_API_KEY", groqApiKeyInput);
+            EnvLoader.TryWriteKey("GROQ_API_KEY", groqApiKeyInput);
+        }
+
         // Geminiモデル
         if (!string.IsNullOrWhiteSpace(TxtGeminiModel.Text))
         {
-            Environment.SetEnvironmentVariable("GEMINI_MODEL", TxtGeminiModel.Text.Trim());
+            string geminiModel = TxtGeminiModel.Text.Trim();
+            Environment.SetEnvironmentVariable("GEMINI_MODEL", geminiModel);
+            // 次回起動後もモデル設定が保持されるよう .env にも書き戻す。
+            EnvLoader.TryWriteKey("GEMINI_MODEL", geminiModel);
         }
 
         // マイクデバイス
@@ -160,5 +187,67 @@ public partial class SettingsWindow : Window
     private void OnCancel(object sender, RoutedEventArgs e)
     {
         Close();
+    }
+
+    /// <summary>
+    /// API キー入力欄を初期化する。キーが既に設定されていても実際の値は表示せず、
+    /// 「設定済み」であることが分かるステータス表示のみ行う。入力欄自体は常に空の状態から
+    /// 始めることで、「空欄のまま保存しても既存キーを消さない」という保存側の前提と一致させる。
+    /// </summary>
+    private static void InitializeApiKeyField(PasswordBox pwd, System.Windows.Controls.TextBox txt, TextBlock status, string envKey)
+    {
+        pwd.Password = string.Empty;
+        txt.Text = string.Empty;
+        txt.Visibility = Visibility.Collapsed;
+        pwd.Visibility = Visibility.Visible;
+
+        string? existing = Environment.GetEnvironmentVariable(envKey);
+        status.Text = string.IsNullOrEmpty(existing)
+            ? "未設定"
+            : "設定済み (空欄のまま保存すると変更されません。変更する場合のみ入力してください)";
+    }
+
+    /// <summary>
+    /// 現在表示されている方 (マスクされた PasswordBox または平文の TextBox) から
+    /// 入力値を取得する。前後の空白は Gemini モデル欄の保存処理と同様に除去する。
+    /// </summary>
+    private static string ReadApiKeyInput(PasswordBox pwd, System.Windows.Controls.TextBox txt)
+    {
+        string raw = txt.Visibility == Visibility.Visible ? txt.Text : pwd.Password;
+        return raw.Trim();
+    }
+
+    private void OnToggleGeminiApiKeyVisibility(object sender, RoutedEventArgs e)
+    {
+        ToggleApiKeyVisibility(PwdGeminiApiKey, TxtGeminiApiKeyVisible);
+    }
+
+    private void OnToggleGroqApiKeyVisibility(object sender, RoutedEventArgs e)
+    {
+        ToggleApiKeyVisibility(PwdGroqApiKey, TxtGroqApiKeyVisible);
+    }
+
+    /// <summary>
+    /// PasswordBox (マスク表示) と TextBox (平文表示) の表示/非表示を切り替える。
+    /// 切り替え時に現在の入力値をもう一方のコントロールへ引き継ぐことで、
+    /// 表示方式を切り替えても入力途中の内容が失われないようにする。
+    /// </summary>
+    private static void ToggleApiKeyVisibility(PasswordBox pwd, System.Windows.Controls.TextBox txt)
+    {
+        bool currentlyPlainText = txt.Visibility == Visibility.Visible;
+        if (currentlyPlainText)
+        {
+            // 表示 -> マスク
+            pwd.Password = txt.Text;
+            txt.Visibility = Visibility.Collapsed;
+            pwd.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            // マスク -> 表示
+            txt.Text = pwd.Password;
+            pwd.Visibility = Visibility.Collapsed;
+            txt.Visibility = Visibility.Visible;
+        }
     }
 }

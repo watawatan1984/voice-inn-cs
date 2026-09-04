@@ -23,6 +23,12 @@
             <Setter Property="BorderBrush" Value="#45475A"/>
             <Setter Property="Padding" Value="6,4"/>
         </Style>
+        <Style TargetType="PasswordBox">
+            <Setter Property="Background" Value="#313244"/>
+            <Setter Property="Foreground" Value="#CDD6F4"/>
+            <Setter Property="BorderBrush" Value="#45475A"/>
+            <Setter Property="Padding" Value="6,4"/>
+        </Style>
         <Style TargetType="ComboBox">
             <Setter Property="Background" Value="#313244"/>
             <Setter Property="Foreground" Value="#11111B"/>
@@ -60,6 +66,42 @@
                                 <ComboBoxItem Content="groq"/>
                             </ComboBox>
                         </Grid>
+
+                        <!-- Gemini API キー: PasswordBox (マスク表示) と TextBox (平文表示) を重ねて、
+                             ボタンで Visibility を切り替える。既存キーがあっても実際の値は表示せず、
+                             下のステータス表示のみで「設定済み」を示す。 -->
+                        <Grid Margin="0,0,0,2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="140"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Gemini API キー:"/>
+                            <Grid Grid.Column="1" Margin="0,0,4,0">
+                                <PasswordBox x:Name="PwdGeminiApiKey"/>
+                                <TextBox x:Name="TxtGeminiApiKeyVisible" Visibility="Collapsed"/>
+                            </Grid>
+                            <Button x:Name="BtnToggleGeminiApiKey" Grid.Column="2" Content="👁" Width="36" Padding="0"
+                                    Click="OnToggleGeminiApiKeyVisibility" ToolTip="表示/非表示を切り替え"/>
+                        </Grid>
+                        <TextBlock x:Name="LblGeminiApiKeyStatus" FontSize="11" Foreground="#A6ADC8" Margin="140,0,0,10"/>
+
+                        <!-- Groq API キー: Gemini API キーと同じ構成。 -->
+                        <Grid Margin="0,0,0,2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="140"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Groq API キー:"/>
+                            <Grid Grid.Column="1" Margin="0,0,4,0">
+                                <PasswordBox x:Name="PwdGroqApiKey"/>
+                                <TextBox x:Name="TxtGroqApiKeyVisible" Visibility="Collapsed"/>
+                            </Grid>
+                            <Button x:Name="BtnToggleGroqApiKey" Grid.Column="2" Content="👁" Width="36" Padding="0"
+                                    Click="OnToggleGroqApiKeyVisibility" ToolTip="表示/非表示を切り替え"/>
+                        </Grid>
+                        <TextBlock x:Name="LblGroqApiKeyStatus" FontSize="11" Foreground="#A6ADC8" Margin="140,0,0,10"/>
 
                         <Grid Margin="0,0,0,10">
                             <Grid.ColumnDefinitions>

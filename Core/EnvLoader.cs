@@ -51,13 +51,15 @@ public static class EnvLoader
     /// (対象キーの行が無い場合は末尾に追加する)。他のキーの行 (GEMINI_API_KEY /
     /// GROQ_API_KEY を含む) の内容は一切変更しない。
     ///
-    /// このファイルには API キーが含まれうるため、以下を厳守する:
+    /// GEMINI_API_KEY / GROQ_API_KEY のような API キー自体の書き込みにも使用できる
+    /// (設定画面の API キー入力欄の保存処理から呼び出される)。このファイルには
+    /// API キーが含まれうるため、以下を厳守する:
     ///   ・書き込みは一時ファイル経由のアトミック置換 (File.Move の overwrite) で行う
     ///   ・失敗しても例外は外へ投げない (設定切替自体を失敗させないため)
-    ///   ・value や既存ファイルの内容を例外メッセージ・ログへ一切出力しない
-    ///
-    /// 呼び出し元は AI_PROVIDER / GEMINI_MODEL のような非機微なキーの永続化のみに
-    /// 使用すること。GEMINI_API_KEY / GROQ_API_KEY を書き換える目的では使用しない。
+    ///   ・value (API キーを含みうる) や既存ファイルの内容を例外メッセージ・ログ・
+    ///     コンソール出力へ一切出力しない
+    ///   ・"export KEY=value" のように export 接頭辞が付いている行は、その接頭辞を
+    ///     保持したまま値だけを置き換える
     /// </summary>
     public static bool TryWriteKey(string key, string value)
     {
