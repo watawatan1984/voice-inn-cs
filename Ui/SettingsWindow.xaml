@@ -217,6 +217,47 @@
                     <Button Grid.Row="2" Content="選択項目を削除" Click="OnDeleteDictItem" HorizontalAlignment="Left" Margin="0,8,0,0" Background="#F38BA8"/>
                 </Grid>
             </TabItem>
+
+            <!-- カテゴリ設定 -->
+            <TabItem Header="カテゴリ">
+                <Grid Margin="12">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="2*"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="1.3*"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Text="アクティブウィンドウの分類に使うキーワードと、カテゴリ別のプロンプトを編集します。" TextWrapping="Wrap" Margin="0,0,0,10"/>
+
+                    <Grid Grid.Row="1" Margin="0,0,0,10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="140"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="カテゴリ:"/>
+                        <ComboBox x:Name="CmbCategory" Grid.Column="1" SelectionChanged="OnCategorySelectionChanged"/>
+                    </Grid>
+
+                    <TextBlock Grid.Row="2" Text="分類キーワード (アプリ名やウィンドウタイトルに含まれる文字列):" Margin="0,0,0,6"/>
+
+                    <DataGrid x:Name="GridCategoryKeywords" Grid.Row="3" AutoGenerateColumns="False"
+                              Background="#313244" Foreground="#CDD6F4" CanUserAddRows="True" Margin="0,0,0,8">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="キーワード" Binding="{Binding Keyword}" Width="*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <Button Grid.Row="4" Content="選択項目を削除" Click="OnDeleteCategoryKeywordItem" HorizontalAlignment="Left" Margin="0,0,0,12" Background="#F38BA8"/>
+
+                    <TextBlock Grid.Row="5" Text="カテゴリ別プロンプト (このカテゴリのウィンドウで文字起こしする際に使う追加指示):" FontWeight="Bold" Margin="0,0,0,6"/>
+
+                    <TextBox x:Name="TxtCategoryPrompt" Grid.Row="6" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
+                </Grid>
+            </TabItem>
         </TabControl>
 
         <!-- 下部操作ボタン -->

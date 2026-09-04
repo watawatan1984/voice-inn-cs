@@ -14,10 +14,24 @@ public class DictEntry
     public string To { get; set; } = string.Empty;
 }
 
+public class CategoryKeywordEntry
+{
+    public string Keyword { get; set; } = string.Empty;
+}
+
 public partial class SettingsWindow : Window
 {
     public event Action? SettingsSaved;
     private readonly ObservableCollection<DictEntry> _dictEntries = [];
+
+    // カテゴリ設定 (カテゴリ切り替え時に編集中の内容を失わないよう、
+    // 選択中でないカテゴリの編集内容もここに保持しておき、保存時にまとめて
+    // settings.AppCategories / settings.CategoryPrompts へ書き戻す。移植元 Python 版
+    // (src/ui/settings.py の _build_categories_tab) と同じ「切替時に退避・保存時に一括反映」方式。
+    private readonly ObservableCollection<CategoryKeywordEntry> _categoryKeywordEntries = [];
+    private Dictionary<string, List<string>> _categoryKeywordsWorking = new();
+    private Dictionary<string, string> _categoryPromptsWorking = new();
+    private string? _currentCategoryKey;
 
     public SettingsWindow()
     {
@@ -88,6 +102,29 @@ public partial class SettingsWindow : Window
             _dictEntries.Add(new DictEntry { From = k, To = v });
         }
         GridDictionary.ItemsSource = _dictEntries;
+
+        // カテゴリ
+        // settings.AppCategories / settings.CategoryPrompts 自体はここではまだ変更しない
+        // (保存を押すまでは読み込み専用のコピーを画面上で編集する)。キー・値ともに
+        // 独立した新しい Dictionary/List へコピーし、画面編集が settings 側の実体に
+        // 影響しないようにする。
+        _categoryKeywordsWorking = settings.AppCategories.ToDictionary(
+            kv => kv.Key,
+            kv => new List<string>(kv.Value));
+        _categoryPromptsWorking = new Dictionary<string, string>(settings.CategoryPrompts);
+
+        GridCategoryKeywords.ItemsSource = _categoryKeywordEntries;
+
+        _currentCategoryKey = null;
+        CmbCategory.Items.Clear();
+        foreach (var categoryKey in _categoryKeywordsWorking.Keys)
+        {
+            CmbCategory.Items.Add(categoryKey);
+        }
+        if (CmbCategory.Items.Count > 0)
+        {
+            CmbCategory.SelectedIndex = 0;
+        }
     }
 
     private void OnDeleteDictItem(object sender, RoutedEventArgs e)
@@ -95,6 +132,76 @@ public partial class SettingsWindow : Window
         if (GridDictionary.SelectedItem is DictEntry selected)
         {
             _dictEntries.Remove(selected);
+        }
+    }
+
+    /// <summary>
+    /// カテゴリ選択が変わったときに呼ばれる。切り替え前のカテゴリの編集内容
+    /// (キーワード一覧・プロンプト) を _categoryKeywordsWorking / _categoryPromptsWorking へ
+    /// 退避してから、新しく選択されたカテゴリの内容を画面へ読み込む。
+    /// これにより、カテゴリを行き来しても入力中の内容が失われない。
+    /// </summary>
+    private void OnCategorySelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (e.RemovedItems.Count > 0 && e.RemovedItems[0] is string previousCategory)
+        {
+            CaptureCurrentCategoryEdits(previousCategory);
+        }
+
+        if (CmbCategory.SelectedItem is string newCategory)
+        {
+            LoadCategoryIntoEditors(newCategory);
+            _currentCategoryKey = newCategory;
+        }
+        else
+        {
+            _currentCategoryKey = null;
+        }
+    }
+
+    /// <summary>
+    /// 画面 (GridCategoryKeywords / TxtCategoryPrompt) に表示中の内容を、指定したカテゴリの
+    /// ものとして _categoryKeywordsWorking / _categoryPromptsWorking へ書き戻す。
+    /// カテゴリ切り替え時と保存時 (OnSaveAndApply) の両方から呼ばれる。
+    /// </summary>
+    private void CaptureCurrentCategoryEdits(string category)
+    {
+        var keywords = new List<string>();
+        foreach (var entry in _categoryKeywordEntries)
+        {
+            if (!string.IsNullOrWhiteSpace(entry.Keyword))
+            {
+                keywords.Add(entry.Keyword.Trim());
+            }
+        }
+
+        _categoryKeywordsWorking[category] = keywords;
+        _categoryPromptsWorking[category] = TxtCategoryPrompt.Text;
+    }
+
+    /// <summary>
+    /// _categoryKeywordsWorking / _categoryPromptsWorking に退避してある、指定カテゴリの内容を
+    /// 画面 (GridCategoryKeywords / TxtCategoryPrompt) へ読み込む。
+    /// </summary>
+    private void LoadCategoryIntoEditors(string category)
+    {
+        _categoryKeywordEntries.Clear();
+        if (_categoryKeywordsWorking.TryGetValue(category, out var keywords))
+        {
+            foreach (var kw in keywords)
+            {
+                _categoryKeywordEntries.Add(new CategoryKeywordEntry { Keyword = kw });
+            }
+        }
+
+        TxtCategoryPrompt.Text = _categoryPromptsWorking.TryGetValue(category, out var prompt) ? prompt : string.Empty;
+    }
+
+    private void OnDeleteCategoryKeywordItem(object sender, RoutedEventArgs e)
+    {
+        if (GridCategoryKeywords.SelectedItem is CategoryKeywordEntry selected)
+        {
+            _categoryKeywordEntries.Remove(selected);
         }
     }
 
@@ -195,6 +302,40 @@ public partial class SettingsWindow : Window
                     settings.Dictionary[entry.From.Trim()] = entry.To ?? string.Empty;
                 }
             }
+        }
+
+        // カテゴリ
+        // 現在画面に表示されているカテゴリの編集内容は、まだ _categoryKeywordsWorking /
+        // _categoryPromptsWorking に退避されていない (カテゴリ切り替え時にしか退避しないため)。
+        // 保存前にここで一度確定させる。
+        if (_currentCategoryKey != null)
+        {
+            CaptureCurrentCategoryEdits(_currentCategoryKey);
+        }
+
+        // settings.AppCategories / settings.CategoryPrompts は、バックグラウンドスレッドから
+        // ロックなしで読まれている (Core.WindowDetector.DetectCategory が AppCategories を、
+        // App.xaml.cs の Task.Run 内が CategoryPrompts.TryGetValue を参照する)。
+        // 既存の Dictionary (単語置換辞書) と同じ App.DictionaryLock を流用して保護しつつ、
+        // ロックの外で新しい Dictionary/List を先に組み立てておき、ロック内では
+        // settings 側のプロパティへの参照差し替えのみを行うことで、書き換え自体を
+        // 一括・最短時間にする。既存インスタンスを Clear/Add で書き換えるのではなく
+        // 新しいインスタンスに丸ごと差し替えるため、差し替え中に読み取り側が既に
+        // 列挙を開始していた場合でも (差し替え前の) 古いインスタンスをそのまま
+        // 列挙し続けるだけで済み、「コレクションが変更されました」例外にはならない。
+        // ただし読み取り側 (WindowDetector / App.xaml.cs) は編集対象外のためロックしておらず、
+        // この対応だけで競合を完全には排除できない点に注意 (詳細はレポート参照)。
+        var newAppCategories = new Dictionary<string, List<string>>();
+        foreach (var (cat, keywords) in _categoryKeywordsWorking)
+        {
+            newAppCategories[cat] = new List<string>(keywords);
+        }
+        var newCategoryPrompts = new Dictionary<string, string>(_categoryPromptsWorking);
+
+        lock (VoiceIn.App.DictionaryLock)
+        {
+            settings.AppCategories = newAppCategories;
+            settings.CategoryPrompts = newCategoryPrompts;
         }
 
         SettingsManager.Instance.Save();
