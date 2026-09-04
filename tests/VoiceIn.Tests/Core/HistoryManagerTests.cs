@@ -220,4 +220,59 @@ public class HistoryManagerTests
         Assert.Equal("文字起こしに失敗しました", items[0].Error);
         Assert.True(items[0].IsError);
     }
+
+    /// <summary>
+    /// Id はミリ秒のタイムスタンプのみで構成されていたため、同一ミリ秒内に追加された
+    /// 項目同士で衝突していた。Id は DeleteItem での同一性判定に使われるので、衝突すると
+    /// 1 件消すつもりが複数消える。連続追加でも一意であることを検証する。
+    /// </summary>
+    [Fact]
+    public void AppendItem_RapidSuccessiveCalls_GeneratesUniqueIds()
+    {
+        using var temp = new TempHistoryManager();
+
+        // 同一ミリ秒に収まりやすいよう、間を空けずに連続で追加する。
+        for (int i = 0; i < 30; i++)
+        {
+            temp.Manager.AppendItem($"項目 {i}", provider: TestProvider);
+        }
+
+        var ids = temp.Manager.LoadItems().Select(i => i.Id).ToList();
+        Assert.Equal(30, ids.Count);
+        Assert.Equal(ids.Count, ids.Distinct().Count());
+    }
+
+    /// <summary>
+    /// Id 生成を修正する前に作られた既存の history.json には、ID が衝突したままの項目が
+    /// 残っている可能性がある。その状態で 1 件削除したときに、同じ ID の他の項目まで
+    /// 巻き添えで消えないことを検証する (UI で選んだ 1 件だけが消えること)。
+    /// </summary>
+    [Fact]
+    public void DeleteItem_LegacyDuplicateIds_RemovesOnlyOneItem()
+    {
+        using var temp = new TempHistoryManager();
+
+        // 旧形式で ID が衝突している history.json を直接用意する。
+        const string duplicatedId = "1700000000000";
+        File.WriteAllText(temp.HistoryFilePath, $$"""
+            {
+              "version": 1,
+              "items": [
+                { "id": "{{duplicatedId}}", "created_at": "2026-01-01T00:00:00+09:00", "provider": "{{TestProvider}}", "text": "衝突A", "error": null },
+                { "id": "{{duplicatedId}}", "created_at": "2026-01-01T00:00:00+09:00", "provider": "{{TestProvider}}", "text": "衝突B", "error": null },
+                { "id": "other", "created_at": "2026-01-01T00:00:01+09:00", "provider": "{{TestProvider}}", "text": "無関係", "error": null }
+              ]
+            }
+            """);
+
+        Assert.Equal(3, temp.Manager.LoadItems().Count);
+
+        temp.Manager.DeleteItem(duplicatedId);
+
+        var afterDelete = temp.Manager.LoadItems();
+        Assert.Equal(2, afterDelete.Count);
+        // 衝突していた 2 件のうち 1 件だけが残る。
+        Assert.Single(afterDelete, i => i.Id == duplicatedId);
+        Assert.Contains(afterDelete, i => i.Text == "無関係");
+    }
 }

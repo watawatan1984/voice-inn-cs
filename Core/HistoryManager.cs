@@ -148,7 +148,11 @@ public class HistoryManager
 
         var item = new HistoryItem
         {
-            Id = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(),
+            // ミリ秒のタイムスタンプだけでは、同一ミリ秒内に追加された項目同士で ID が衝突する。
+            // ID は DeleteItem での項目の同一性判定に使われるため、衝突すると 1 件消すつもりが
+            // 複数消えてしまう。一意な接尾辞を付けて衝突をなくす。
+            // (先頭のタイムスタンプはログや JSON を直接見たときの手掛かりとして残している)
+            Id = $"{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}-{Guid.NewGuid():N}",
             CreatedAt = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:sszzz"),
             Provider = provider ?? SettingsManager.Instance.CurrentProvider,
             Text = txt,
@@ -177,9 +181,15 @@ public class HistoryManager
         }
 
         var items = LoadItems();
-        int removed = items.RemoveAll(i => i.Id == id);
-        if (removed > 0)
+
+        // RemoveAll ではなく最初の 1 件だけを削除する。ID 生成の修正前に作られた既存の
+        // history.json には、同一ミリ秒内に追加されたことで ID が衝突している項目が
+        // 残っている可能性がある。RemoveAll だとそれらを巻き添えで消してしまうため、
+        // 「UI で選んだ 1 件だけが消える」ことを保証する。
+        int index = items.FindIndex(i => i.Id == id);
+        if (index >= 0)
         {
+            items.RemoveAt(index);
             SaveItems(items);
         }
     }
