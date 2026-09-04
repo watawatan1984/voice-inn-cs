@@ -29,6 +29,7 @@ public partial class App : System.Windows.Application
     private OverlayWindow? _overlayWindow;
     private SettingsWindow? _settingsWindow;
     private HistoryWindow? _historyWindow;
+    private SetupWindow? _setupWindow;
 
     private readonly KeyboardHook _keyboardHook = new();
     private readonly AudioRecorder _audioRecorder = new();
@@ -79,6 +80,18 @@ public partial class App : System.Windows.Application
         {
             MessageBox.Show($"グローバルホットキーの初期化に失敗しました: {ex.Message}", "Voice In エラー", MessageBoxButton.OK, MessageBoxImage.Error);
         }
+
+        // 初回起動判定: GEMINI_API_KEY / GROQ_API_KEY のどちらも未設定ならセットアップウィザードを開く
+        // (移植元 Python 版 src/main.py の check_first_run と同じ判定)。
+        // OnStartup の中で同期的に ShowDialog() を呼ぶと起動処理をブロックしてしまうため、
+        // Dispatcher.BeginInvoke でメッセージループが回り始めてから (オーバーレイ表示・トレイアイコン
+        // 初期化が完了した後) モードレスに Show() する。
+        bool hasGeminiKey = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GEMINI_API_KEY"));
+        bool hasGroqKey = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GROQ_API_KEY"));
+        if (!hasGeminiKey && !hasGroqKey)
+        {
+            Dispatcher.BeginInvoke(new Action(OpenSetupWizard));
+        }
     }
 
     private void SetupNotifyIcon()
@@ -123,6 +136,7 @@ public partial class App : System.Windows.Application
         menu.Items.Add(groqItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
 
+        menu.Items.Add("セットアップウィザード...", null, (s, e) => OpenSetupWizard());
         menu.Items.Add("設定...", null, (s, e) => OpenSettings());
         menu.Items.Add("履歴...", null, (s, e) => OpenHistory());
         menu.Items.Add(new Forms.ToolStripSeparator());
@@ -336,6 +350,26 @@ public partial class App : System.Windows.Application
             }
             _settingsWindow.Show();
             _settingsWindow.Activate();
+        });
+    }
+
+    private void OpenSetupWizard()
+    {
+        Dispatcher.Invoke(() =>
+        {
+            if (_setupWindow == null || !_setupWindow.IsLoaded)
+            {
+                _setupWindow = new SetupWindow();
+                _setupWindow.SettingsSaved += () =>
+                {
+                    UpdateTrayMenu();
+                    _overlayWindow?.SetState("idle");
+                    // ホットキー設定が変更された可能性があるため、KeyboardHook のキャッシュを更新する
+                    _keyboardHook.RefreshHoldKey();
+                };
+            }
+            _setupWindow.Show();
+            _setupWindow.Activate();
         });
     }
 
