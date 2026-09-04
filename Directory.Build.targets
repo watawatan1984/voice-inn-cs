@@ -1,0 +1,23 @@
+<Project>
+
+  <!--
+    VoiceIn.csproj はリポジトリのルートに配置されており、SDK既定の Compile 項目グロブ (**/*.cs) が
+    そのままだと tests/ 配下に追加したテストプロジェクトのソースファイルまで巻き込んでしまう
+    （WPF の一時アセンブリ生成 (*_wpftmp.csproj) 経由でも同様に発生することを確認済み）。
+
+    本体の VoiceIn.csproj ファイル自体は一切変更せず、この共有ビルドファイル側で
+    tests/ 配下を Compile 項目から除外することで衝突を回避する。
+    ※ Directory.Build.props ではなく .targets に置いているのは、既定の Compile グロブが
+      確定するのは Sdk.props の後（.props インポート時点ではまだ存在しない）ためであり、
+      .targets（Sdk.targets の後にインポートされる）でないと Remove が効かない。
+
+    tests/VoiceIn.Tests/ 配下には空の Directory.Build.targets を置き、
+    このファイルの探索がそこで打ち切られるようにしている。
+    そのため、このファイルはテストプロジェクト自身のビルドには一切影響しない
+    （tests/VoiceIn.Tests/Directory.Build.targets の説明コメントも参照）。
+  -->
+  <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+  </ItemGroup>
+
+</Project>

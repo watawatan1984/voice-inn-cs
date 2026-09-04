@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
@@ -21,6 +22,12 @@ public class KeyboardHook : IDisposable
     private IntPtr _hookId = IntPtr.Zero;
     private bool _isKeyPressed = false;
 
+    // フックコールバックはシステム全体のあらゆるキーイベントごとに呼ばれるホットパスのため、
+    // 毎回 SettingsManager から HoldKey を読んで文字列アロケーションするのを避け、
+    // 対象 VK コードをキャッシュしておく。Start() 時と、設定保存時 (RefreshHoldKey 呼び出し) に
+    // のみ再計算する。
+    private int _targetVkCode = VK_LMENU;
+
     public event Action? KeyPressed;
     public event Action? KeyReleased;
 
@@ -31,10 +38,20 @@ public class KeyboardHook : IDisposable
 
     public void Start()
     {
+        RefreshHoldKey();
         if (_hookId == IntPtr.Zero)
         {
             _hookId = SetHook(_proc);
         }
+    }
+
+    /// <summary>
+    /// キャッシュしている対象 VK コードを現在の設定 (Audio.HoldKey) から再計算する。
+    /// ホットキー設定が変更されたとき (設定画面の保存完了時) に呼び出すこと。
+    /// </summary>
+    public void RefreshHoldKey()
+    {
+        _targetVkCode = ComputeTargetVkCode();
     }
 
     public void Stop()
@@ -51,7 +68,15 @@ public class KeyboardHook : IDisposable
     {
         using var curProcess = Process.GetCurrentProcess();
         using var curModule = curProcess.MainModule;
-        return SetWindowsHookEx(WH_KEYBOARD_LL, proc, GetModuleHandle(curModule?.ModuleName), 0);
+        IntPtr hookId = SetWindowsHookEx(WH_KEYBOARD_LL, proc, GetModuleHandle(curModule?.ModuleName), 0);
+        if (hookId == IntPtr.Zero)
+        {
+            // SetLastError = true の P/Invoke 直後、他の呼び出しを挟まずに取得すること。
+            int error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(error);
+        }
+
+        return hookId;
     }
 
     private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
@@ -61,9 +86,8 @@ public class KeyboardHook : IDisposable
         if (nCode >= 0)
         {
             int vkCode = Marshal.ReadInt32(lParam);
-            int targetVk = GetTargetVkCode();
 
-            if (vkCode == targetVk)
+            if (vkCode == _targetVkCode)
             {
                 int msg = wParam.ToInt32();
                 if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
@@ -88,7 +112,7 @@ public class KeyboardHook : IDisposable
         return CallNextHookEx(_hookId, nCode, wParam, lParam);
     }
 
-    private static int GetTargetVkCode()
+    private static int ComputeTargetVkCode()
     {
         string holdKey = SettingsManager.Instance.Settings.Audio.HoldKey?.ToLowerInvariant() ?? "alt_l";
         return holdKey switch

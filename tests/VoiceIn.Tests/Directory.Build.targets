@@ -1,0 +1,12 @@
+<Project>
+
+  <!--
+    このファイルは意図的に空にしている。
+    MSBuild は Directory.Build.targets をプロジェクトディレクトリから上位に向かって探索し、
+    最初に見つかったものだけをインポートする（複数階層をマージしない）。
+    このファイルを置くことで、リポジトリ ルートの Directory.Build.targets
+    （tests/ 配下を VoiceIn.csproj の既定 Compile グロブから除外するためのもの）が
+    このテストプロジェクト自身には適用されないようにしている。
+  -->
+
+</Project>

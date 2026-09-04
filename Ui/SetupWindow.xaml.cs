@@ -1,0 +1,339 @@
+using System;
+using System.Windows;
+using System.Windows.Controls;
+using VoiceIn.Audio;
+using VoiceIn.Core;
+
+namespace VoiceIn.Ui;
+
+/// <summary>
+/// 初回セットアップウィザード。
+/// 「ようこそ」「AIプロバイダとAPIキー」「マイクデバイス」「操作キー」「完了」の
+/// 5ページ構成で、初回起動時に自動で開かれるほか、タスクトレイメニューからいつでも再実行できる。
+/// </summary>
+public partial class SetupWindow : Window
+{
+    /// <summary>保存が完了したことを呼び出し元 (App.xaml.cs) へ伝えるイベント。SettingsWindow.SettingsSaved と同じ役割。</summary>
+    public event Action? SettingsSaved;
+
+    private readonly UIElement[] _pages;
+
+    private static readonly string[] PageTitles =
+    [
+        "ようこそ",
+        "AI プロバイダと API キー",
+        "マイクデバイス",
+        "操作キー",
+        "完了"
+    ];
+
+    private int _currentPage;
+
+    // InitializeComponent() の実行中 (XAML パース中) に RadioButton.IsChecked などの
+    // 変更イベントが早期発火すると、まだ未接続の他フィールド (PanelGeminiFields 等) への
+    // アクセスで NullReferenceException になりうる。InitializeComponent 完了後に true にし、
+    // それより前にイベントハンドラが呼ばれても何もしないようにするガード。
+    private bool _initialized;
+
+    public SetupWindow()
+    {
+        InitializeComponent();
+
+        _pages = [PageWelcome, PageProvider, PageDevice, PageControls, PageFinish];
+        _initialized = true;
+
+        LoadDefaults();
+        UpdateProviderPanels();
+        ShowPage(0);
+    }
+
+    private void LoadDefaults()
+    {
+        var settings = SettingsManager.Instance.Settings;
+
+        // プロバイダ (未設定時は SettingsManager.CurrentProvider の既定値である gemini を選択)
+        string curProvider = SettingsManager.Instance.CurrentProvider;
+        bool groqSelected = curProvider.ToLowerInvariant() == "groq";
+        RbGemini.IsChecked = !groqSelected;
+        RbGroq.IsChecked = groqSelected;
+
+        // API キー: 設定済みでも実際の値は表示せず、ステータス表示のみ行う (SettingsWindow と同じ方針)
+        InitializeApiKeyField(PwdGeminiApiKey, TxtGeminiApiKeyVisible, LblGeminiApiKeyStatus, "GEMINI_API_KEY");
+        InitializeApiKeyField(PwdGroqApiKey, TxtGroqApiKeyVisible, LblGroqApiKeyStatus, "GROQ_API_KEY");
+
+        // Gemini モデル
+        TxtGeminiModel.Text = Environment.GetEnvironmentVariable("GEMINI_MODEL") ?? "gemini-2.5-flash";
+
+        // マイク一覧 (SettingsWindow と同じ構成: index 0 = 既定のデバイス)
+        var mics = AudioRecorder.GetInputDevices();
+        CmbMicDevice.Items.Clear();
+        CmbMicDevice.Items.Add("既定のデバイス");
+        int selectedMicIndex = 0;
+        for (int i = 0; i < mics.Count; i++)
+        {
+            CmbMicDevice.Items.Add($"[{mics[i].Index}] {mics[i].Name}");
+            if (settings.Audio.InputDevice.HasValue && settings.Audio.InputDevice.Value == mics[i].Index)
+            {
+                selectedMicIndex = i + 1;
+            }
+        }
+        CmbMicDevice.SelectedIndex = selectedMicIndex;
+
+        // 録音キー
+        string holdKey = settings.Audio.HoldKey?.ToLowerInvariant() ?? "alt_l";
+        CmbHoldKey.SelectedIndex = holdKey switch
+        {
+            "alt_r" => 1,
+            "ctrl_l" => 2,
+            "ctrl_r" => 3,
+            _ => 0
+        };
+
+        ChkAutoPaste.IsChecked = settings.Audio.AutoPaste;
+    }
+
+    /// <summary>
+    /// API キー入力欄を初期化する。キーが既に設定されていても実際の値は表示せず、
+    /// 「設定済み」であることが分かるステータス表示のみ行う (SettingsWindow.InitializeApiKeyField と同じ考え方)。
+    /// </summary>
+    private static void InitializeApiKeyField(PasswordBox pwd, System.Windows.Controls.TextBox txt, TextBlock status, string envKey)
+    {
+        pwd.Password = string.Empty;
+        txt.Text = string.Empty;
+        txt.Visibility = Visibility.Collapsed;
+        pwd.Visibility = Visibility.Visible;
+
+        string? existing = Environment.GetEnvironmentVariable(envKey);
+        status.Text = string.IsNullOrEmpty(existing)
+            ? "未設定"
+            : "設定済み (空欄のまま進めても変更されません。変更する場合のみ入力してください)";
+    }
+
+    private void OnProviderChanged(object sender, RoutedEventArgs e)
+    {
+        if (!_initialized) return;
+        UpdateProviderPanels();
+        UpdateNavState();
+    }
+
+    private void UpdateProviderPanels()
+    {
+        bool geminiSelected = RbGemini.IsChecked == true;
+        PanelGeminiFields.Visibility = geminiSelected ? Visibility.Visible : Visibility.Collapsed;
+        PanelGroqFields.Visibility = geminiSelected ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void OnGeminiApiKeyPasswordChanged(object sender, RoutedEventArgs e) => OnApiKeyFieldChanged();
+
+    private void OnGeminiApiKeyTextChanged(object sender, TextChangedEventArgs e) => OnApiKeyFieldChanged();
+
+    private void OnGroqApiKeyPasswordChanged(object sender, RoutedEventArgs e) => OnApiKeyFieldChanged();
+
+    private void OnGroqApiKeyTextChanged(object sender, TextChangedEventArgs e) => OnApiKeyFieldChanged();
+
+    private void OnApiKeyFieldChanged()
+    {
+        if (!_initialized) return;
+        UpdateNavState();
+    }
+
+    private void OnToggleGeminiApiKeyVisibility(object sender, RoutedEventArgs e)
+    {
+        ToggleApiKeyVisibility(PwdGeminiApiKey, TxtGeminiApiKeyVisible);
+    }
+
+    private void OnToggleGroqApiKeyVisibility(object sender, RoutedEventArgs e)
+    {
+        ToggleApiKeyVisibility(PwdGroqApiKey, TxtGroqApiKeyVisible);
+    }
+
+    /// <summary>
+    /// PasswordBox (マスク表示) と TextBox (平文表示) の表示/非表示を切り替える。
+    /// 切り替え時に現在の入力値をもう一方のコントロールへ引き継ぐ (SettingsWindow と同じ実装)。
+    /// </summary>
+    private static void ToggleApiKeyVisibility(PasswordBox pwd, System.Windows.Controls.TextBox txt)
+    {
+        bool currentlyPlainText = txt.Visibility == Visibility.Visible;
+        if (currentlyPlainText)
+        {
+            pwd.Password = txt.Text;
+            txt.Visibility = Visibility.Collapsed;
+            pwd.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            txt.Text = pwd.Password;
+            pwd.Visibility = Visibility.Collapsed;
+            txt.Visibility = Visibility.Visible;
+        }
+    }
+
+    /// <summary>
+    /// 現在表示されている方 (マスクされた PasswordBox または平文の TextBox) から入力値を取得する。
+    /// </summary>
+    private static string ReadApiKeyInput(PasswordBox pwd, System.Windows.Controls.TextBox txt)
+    {
+        string raw = txt.Visibility == Visibility.Visible ? txt.Text : pwd.Password;
+        return raw.Trim();
+    }
+
+    /// <summary>
+    /// 現在選択中のプロバイダについて、入力欄またはすでに設定済みの環境変数のいずれかに
+    /// API キーがあるかどうかを判定する。「次へ」ボタンの活性/非活性判定に使う。
+    /// </summary>
+    private bool HasUsableApiKey()
+    {
+        bool geminiSelected = RbGemini.IsChecked == true;
+        string envKey = geminiSelected ? "GEMINI_API_KEY" : "GROQ_API_KEY";
+        string input = geminiSelected
+            ? ReadApiKeyInput(PwdGeminiApiKey, TxtGeminiApiKeyVisible)
+            : ReadApiKeyInput(PwdGroqApiKey, TxtGroqApiKeyVisible);
+
+        if (!string.IsNullOrEmpty(input))
+        {
+            return true;
+        }
+        return !string.IsNullOrEmpty(Environment.GetEnvironmentVariable(envKey));
+    }
+
+    private void ShowPage(int index)
+    {
+        _currentPage = index;
+        for (int i = 0; i < _pages.Length; i++)
+        {
+            _pages[i].Visibility = i == index ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        TxtStepIndicator.Text = $"ステップ {index + 1} / {_pages.Length} ・ {PageTitles[index]}";
+
+        if (index == _pages.Length - 1)
+        {
+            UpdateSummary();
+        }
+
+        UpdateNavState();
+    }
+
+    private void UpdateNavState()
+    {
+        if (!_initialized) return;
+
+        BtnBack.IsEnabled = _currentPage > 0;
+        BtnNext.Content = _currentPage == _pages.Length - 1 ? "完了" : "次へ";
+
+        bool canProceed = true;
+        if (_currentPage == 1)
+        {
+            // プロバイダ/APIキーのページ: 選択中プロバイダの API キーが
+            // 入力欄にも環境変数にも無い場合は「次へ」を無効にする。
+            canProceed = HasUsableApiKey();
+        }
+        BtnNext.IsEnabled = canProceed;
+    }
+
+    private void UpdateSummary()
+    {
+        bool geminiSelected = RbGemini.IsChecked == true;
+        string providerLabel = geminiSelected ? "Gemini" : "Groq";
+
+        string micLabel = CmbMicDevice.SelectedIndex <= 0
+            ? "既定のデバイス"
+            : CmbMicDevice.SelectedItem?.ToString() ?? "既定のデバイス";
+
+        string holdKeyLabel = CmbHoldKey.SelectedIndex switch
+        {
+            1 => "alt_r (右Alt)",
+            2 => "ctrl_l (左Ctrl)",
+            3 => "ctrl_r (右Ctrl)",
+            _ => "alt_l (左Alt)"
+        };
+
+        string autoPasteLabel = (ChkAutoPaste.IsChecked ?? true) ? "有効" : "無効";
+
+        TxtSummary.Text =
+            $"AI プロバイダ: {providerLabel}\n" +
+            $"マイク入力デバイス: {micLabel}\n" +
+            $"録音キー: {holdKeyLabel}\n" +
+            $"自動貼り付け: {autoPasteLabel}";
+    }
+
+    private void OnNext(object sender, RoutedEventArgs e)
+    {
+        if (_currentPage == _pages.Length - 1)
+        {
+            SaveAndFinish();
+            return;
+        }
+        ShowPage(_currentPage + 1);
+    }
+
+    private void OnBack(object sender, RoutedEventArgs e)
+    {
+        if (_currentPage > 0)
+        {
+            ShowPage(_currentPage - 1);
+        }
+    }
+
+    private void OnCancel(object sender, RoutedEventArgs e)
+    {
+        Close();
+    }
+
+    private void SaveAndFinish()
+    {
+        var settings = SettingsManager.Instance.Settings;
+
+        // プロバイダ (setter が .env へも書き戻す)
+        bool geminiSelected = RbGemini.IsChecked == true;
+        SettingsManager.Instance.CurrentProvider = geminiSelected ? "gemini" : "groq";
+
+        // API キー: 空欄のまま完了した場合は既存のキーを一切変更しない。
+        // 実際に新しい値が入力されたときのみ、環境変数への即時反映と .env への書き戻しを行う
+        // (SettingsWindow.OnSaveAndApply と同じ方針)。
+        string geminiApiKeyInput = ReadApiKeyInput(PwdGeminiApiKey, TxtGeminiApiKeyVisible);
+        if (!string.IsNullOrEmpty(geminiApiKeyInput))
+        {
+            Environment.SetEnvironmentVariable("GEMINI_API_KEY", geminiApiKeyInput);
+            EnvLoader.TryWriteKey("GEMINI_API_KEY", geminiApiKeyInput);
+        }
+
+        string groqApiKeyInput = ReadApiKeyInput(PwdGroqApiKey, TxtGroqApiKeyVisible);
+        if (!string.IsNullOrEmpty(groqApiKeyInput))
+        {
+            Environment.SetEnvironmentVariable("GROQ_API_KEY", groqApiKeyInput);
+            EnvLoader.TryWriteKey("GROQ_API_KEY", groqApiKeyInput);
+        }
+
+        // Gemini モデル
+        if (!string.IsNullOrWhiteSpace(TxtGeminiModel.Text))
+        {
+            string geminiModel = TxtGeminiModel.Text.Trim();
+            Environment.SetEnvironmentVariable("GEMINI_MODEL", geminiModel);
+            EnvLoader.TryWriteKey("GEMINI_MODEL", geminiModel);
+        }
+
+        // マイクデバイス
+        settings.Audio.InputDevice = CmbMicDevice.SelectedIndex <= 0
+            ? null
+            : CmbMicDevice.SelectedIndex - 1;
+
+        // 録音キー
+        settings.Audio.HoldKey = CmbHoldKey.SelectedIndex switch
+        {
+            1 => "alt_r",
+            2 => "ctrl_l",
+            3 => "ctrl_r",
+            _ => "alt_l"
+        };
+
+        // 自動貼り付け
+        settings.Audio.AutoPaste = ChkAutoPaste.IsChecked ?? true;
+
+        SettingsManager.Instance.Save();
+        SettingsSaved?.Invoke();
+
+        MessageBox.Show("セットアップが完了しました。Voice In をお使いいただけます。", "Voice In", MessageBoxButton.OK, MessageBoxImage.Information);
+        Close();
+    }
+}
