@@ -121,6 +121,16 @@
                             <ComboBox x:Name="CmbMicDevice" Grid.Column="1"/>
                         </Grid>
 
+                        <Grid Margin="0,0,0,2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="140"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="入力ゲイン (dB):"/>
+                            <TextBox x:Name="TxtInputGain" Grid.Column="1"/>
+                        </Grid>
+                        <TextBlock Text="マイク音量を dB 単位で増減します (-30.0 ~ 30.0 dB)。" FontSize="11" Foreground="#A6ADC8" Margin="140,0,0,10"/>
+
                         <Grid Margin="0,0,0,10">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="140"/>
@@ -143,6 +153,16 @@
                             <TextBlock Text="最大録音時間 (秒):"/>
                             <TextBox x:Name="TxtMaxRecord" Grid.Column="1"/>
                         </Grid>
+
+                        <Grid Margin="0,0,0,2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="140"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="最小録音時間 (秒):"/>
+                            <TextBox x:Name="TxtMinDuration" Grid.Column="1"/>
+                        </Grid>
+                        <TextBlock Text="これより短い録音は無音とみなして破棄されます (0.2 ~ 5.0 秒)。" FontSize="11" Foreground="#A6ADC8" Margin="140,0,0,10"/>
 
                         <Grid Margin="0,0,0,10">
                             <Grid.ColumnDefinitions>

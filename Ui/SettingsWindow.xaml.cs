@@ -1,5 +1,6 @@
 using System;
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using VoiceIn.Audio;
@@ -70,6 +71,8 @@ public partial class SettingsWindow : Window
         // 各種数値・フラグ
         TxtMaxRecord.Text = settings.Audio.MaxRecordSeconds.ToString();
         TxtPasteDelay.Text = settings.Audio.PasteDelayMs.ToString();
+        TxtMinDuration.Text = settings.Audio.MinDuration.ToString(CultureInfo.InvariantCulture);
+        TxtInputGain.Text = settings.Audio.InputGainDb.ToString(CultureInfo.InvariantCulture);
         ChkAutoPaste.IsChecked = settings.Audio.AutoPaste;
         ChkContextAware.IsChecked = settings.ContextAwareEnabled;
 
@@ -97,6 +100,21 @@ public partial class SettingsWindow : Window
 
     private void OnSaveAndApply(object sender, RoutedEventArgs e)
     {
+        // 数値入力の検証を最初に行う。1件でも範囲外・パース不能な値があれば、
+        // 値を書き換えたり既定値へ戻したりせず、具体的な原因を伝えて保存処理全体を中断する。
+        if (!TryValidateNumericFields(
+                out int maxRecordSeconds,
+                out int pasteDelayMs,
+                out double minDuration,
+                out double inputGainDb,
+                out string validationError,
+                out System.Windows.Controls.TextBox? firstInvalidField))
+        {
+            MessageBox.Show(validationError, "Voice In - 入力内容を確認してください", MessageBoxButton.OK, MessageBoxImage.Warning);
+            firstInvalidField?.Focus();
+            return;
+        }
+
         var settings = SettingsManager.Instance.Settings;
 
         // プロバイダ
@@ -149,9 +167,11 @@ public partial class SettingsWindow : Window
             _ => "alt_l"
         };
 
-        // 数値
-        if (int.TryParse(TxtMaxRecord.Text, out int maxRec)) settings.Audio.MaxRecordSeconds = maxRec;
-        if (int.TryParse(TxtPasteDelay.Text, out int delay)) settings.Audio.PasteDelayMs = delay;
+        // 数値 (メソッド冒頭で範囲検証済みの値をそのまま反映する)
+        settings.Audio.MaxRecordSeconds = maxRecordSeconds;
+        settings.Audio.PasteDelayMs = pasteDelayMs;
+        settings.Audio.MinDuration = minDuration;
+        settings.Audio.InputGainDb = inputGainDb;
 
         settings.Audio.AutoPaste = ChkAutoPaste.IsChecked ?? true;
         settings.ContextAwareEnabled = ChkContextAware.IsChecked ?? true;
@@ -187,6 +207,58 @@ public partial class SettingsWindow : Window
     private void OnCancel(object sender, RoutedEventArgs e)
     {
         Close();
+    }
+
+    /// <summary>
+    /// 保存前に数値入力欄 (最大録音時間・貼り付け遅延・最小録音時間・入力ゲイン) を検証する。
+    /// パースに失敗した場合や範囲外の場合は、その項目を黙って無視したり既定値へ戻したりせず、
+    /// 具体的な原因を <paramref name="errorMessage"/> にまとめて呼び出し元に伝える。
+    /// 呼び出し元はこれが false のとき保存処理そのものを中断すること。
+    /// </summary>
+    private bool TryValidateNumericFields(
+        out int maxRecordSeconds,
+        out int pasteDelayMs,
+        out double minDuration,
+        out double inputGainDb,
+        out string errorMessage,
+        out System.Windows.Controls.TextBox? firstInvalidField)
+    {
+        var errors = new List<string>();
+        firstInvalidField = null;
+
+        if (!int.TryParse(TxtMaxRecord.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out maxRecordSeconds)
+            || maxRecordSeconds < 5 || maxRecordSeconds > 600)
+        {
+            errors.Add("最大録音時間は 5〜600 秒の範囲で入力してください。");
+            firstInvalidField ??= TxtMaxRecord;
+        }
+
+        if (!int.TryParse(TxtPasteDelay.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out pasteDelayMs)
+            || pasteDelayMs < 0 || pasteDelayMs > 1000)
+        {
+            errors.Add("貼り付け遅延は 0〜1000 ms の範囲で入力してください。");
+            firstInvalidField ??= TxtPasteDelay;
+        }
+
+        if (!double.TryParse(TxtMinDuration.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out minDuration)
+            || minDuration < 0.2 || minDuration > 5.0)
+        {
+            errors.Add("最小録音時間は 0.2〜5.0 秒の範囲で入力してください。");
+            firstInvalidField ??= TxtMinDuration;
+        }
+
+        if (!double.TryParse(TxtInputGain.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out inputGainDb)
+            || inputGainDb < -30.0 || inputGainDb > 30.0)
+        {
+            errors.Add("入力ゲインは -30.0〜30.0 dB の範囲で入力してください。");
+            firstInvalidField ??= TxtInputGain;
+        }
+
+        errorMessage = errors.Count == 0
+            ? string.Empty
+            : "設定を保存できませんでした。以下の項目を修正してください。\n\n・" + string.Join("\n・", errors);
+
+        return errors.Count == 0;
     }
 
     /// <summary>
