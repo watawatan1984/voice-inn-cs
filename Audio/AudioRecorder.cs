@@ -64,7 +64,7 @@ public class AudioRecorder : IDisposable
         // App.xaml.cs は Start(inputDevice, maxRecordSeconds) の2引数で呼ぶため、
         // 既存の呼び出しはそのまま動作する。
         double gainDb = inputGainDb ?? SettingsManager.Instance.Settings.Audio.InputGainDb;
-        _gainMultiplier = gainDb == 0.0 ? 1.0 : Math.Pow(10.0, gainDb / 20.0);
+        _gainMultiplier = AudioSampleProcessor.DbToLinearGain(gainDb);
 
         // NAudio 3.0.1 では WaveIn 自体が専用キャプチャスレッド (RecordThread) と
         // AutoResetEvent ベースのコールバックで実装されており、呼び出しスレッドの
@@ -147,24 +147,10 @@ public class AudioRecorder : IDisposable
         if (writer == null) return;
 
         int bytesRecorded = e.BytesRecorded;
-        byte[] outBuffer = e.Buffer;
 
-        // 0dB (倍率 1.0) のときは無駄な計算を避けるため早期分岐し、元のバッファをそのまま使う。
-        if (_gainMultiplier != 1.0)
-        {
-            outBuffer = new byte[bytesRecorded];
-            for (int i = 0; i < bytesRecorded; i += 2)
-            {
-                short sample = (short)((e.Buffer[i + 1] << 8) | e.Buffer[i]);
-                double amplified = Math.Round(sample * _gainMultiplier);
-
-                // 16bit PCM の範囲外に飛ばないようクリッピングする。
-                short clipped = (short)Math.Clamp(amplified, short.MinValue, short.MaxValue);
-
-                outBuffer[i] = (byte)(clipped & 0xFF);
-                outBuffer[i + 1] = (byte)((clipped >> 8) & 0xFF);
-            }
-        }
+        // ゲイン適用 (dB→倍率変換・16bit PCM クリッピング) は AudioSampleProcessor へ
+        // 切り出し済み。倍率 1.0 (0dB) のときに無駄なコピーを避ける早期分岐も内部にある。
+        byte[] outBuffer = AudioSampleProcessor.ApplyGain(e.Buffer, bytesRecorded, _gainMultiplier);
 
         try
         {
@@ -177,18 +163,13 @@ public class AudioRecorder : IDisposable
             return;
         }
 
-        // ゲイン適用後の値で RMS / Peak を集計する。
-        for (int i = 0; i < bytesRecorded; i += 2)
-        {
-            short sample = (short)((outBuffer[i + 1] << 8) | outBuffer[i]);
-            float sample32 = sample / 32768f;
-
-            float abs = Math.Abs(sample32);
-            if (abs > _peak) _peak = abs;
-
-            _sumSquared += sample32 * sample32;
-            _totalSamples++;
-        }
+        // ゲイン適用後の値で RMS / Peak を集計する (集計ロジックも AudioSampleProcessor へ
+        // 切り出し済み)。Peak は結合則を満たすため、チャンクごとの最大値を Math.Max していく形でも
+        // 全サンプルを通しで見た場合と結果は変わらない。
+        var (sampleCount, sumSquared, peak) = AudioSampleProcessor.Aggregate(outBuffer, bytesRecorded);
+        _totalSamples += sampleCount;
+        _sumSquared += sumSquared;
+        if (peak > _peak) _peak = peak;
     }
 
     private void OnAutoStopTimer(object? state)
@@ -286,5 +267,104 @@ public class AudioRecorder : IDisposable
         _autoStopTimer.Dispose();
         _recordingStoppedSignal.Dispose();
         GC.SuppressFinalize(this);
+    }
+}
+
+// AudioRecorder.OnDataAvailable (NAudio のイベントハンドラ) に埋め込まれていた
+// 「入力ゲインの適用 (dB→線形倍率変換・16bit PCM クリッピング)」と「RMS/Peak の集計」を
+// 切り出した純粋関数群。NAudio の型にもマイクデバイスにも依存しないため単体テストが可能。
+// [assembly: InternalsVisibleTo("VoiceIn.Tests")] (AssemblyInfo.cs) によりテストプロジェクトから
+// internal のまま参照できる。
+//
+// 【重要】ここを変更する場合、OnDataAvailable が元々インラインで行っていた計算
+// (丸め方・クリッピング範囲・RMS/Peak の正規化式) を、有効な (偶数長の) 入力については
+// 1バイトも結果を変えないこと。
+internal static class AudioSampleProcessor
+{
+    // 16bit PCM の 1 サンプルあたりのバイト数。
+    private const int BytesPerSample = 2;
+
+    /// <summary>
+    /// 入力ゲイン (dB) を線形倍率に変換する。AudioRecorder.Start() が設定値 (または明示指定の
+    /// 引数) から _gainMultiplier を求めるのに使う。0dB は Math.Pow の丸め誤差を避けるため
+    /// 特別扱いしてちょうど 1.0 を返す (元の実装と同じ分岐)。
+    /// </summary>
+    internal static double DbToLinearGain(double gainDb) =>
+        gainDb == 0.0 ? 1.0 : Math.Pow(10.0, gainDb / 20.0);
+
+    /// <summary>
+    /// 16bit PCM (リトルエンディアン、1サンプル2バイト) のバイト列にゲインを適用する。
+    /// ・gainMultiplier が 1.0 (0dB) のときは、元の OnDataAvailable の早期分岐と同じく
+    ///   無駄なコピーを避けるため buffer をそのまま返す (新規配列は作らない)。
+    /// ・それ以外は新しいバイト列へゲイン適用後の値を書き込んで返す (buffer 自体は変更しない)。
+    /// ・Math.Round で丸めたのち short.MinValue〜short.MaxValue にクリッピングしてからキャストする
+    ///   (クリッピングを経由せず単純に (short) キャストすると、範囲外の値は符号が反転して
+    ///   逆方向に振り切れてしまうため、クリッピングは省略できない)。
+    /// ・bytesRecorded が奇数の場合、対になるバイトが無い末尾の1バイトは処理対象から除外し
+    ///   そのままコピーする (範囲外アクセスの例外を避けるため)。16bit モノラルの実録音では
+    ///   NAudio からのコールバックの BytesRecorded は常に偶数になる想定のため、この分岐が
+    ///   有効な録音の計算結果に影響することはない。
+    /// </summary>
+    internal static byte[] ApplyGain(byte[] buffer, int bytesRecorded, double gainMultiplier)
+    {
+        if (gainMultiplier == 1.0)
+        {
+            return buffer;
+        }
+
+        var outBuffer = new byte[bytesRecorded];
+        int pairedLength = bytesRecorded - (bytesRecorded % BytesPerSample);
+
+        for (int i = 0; i < pairedLength; i += BytesPerSample)
+        {
+            short sample = (short)((buffer[i + 1] << 8) | buffer[i]);
+            double amplified = Math.Round(sample * gainMultiplier);
+
+            // 16bit PCM の範囲外に飛ばないようクリッピングする。
+            short clipped = (short)Math.Clamp(amplified, short.MinValue, short.MaxValue);
+
+            outBuffer[i] = (byte)(clipped & 0xFF);
+            outBuffer[i + 1] = (byte)((clipped >> 8) & 0xFF);
+        }
+
+        if (pairedLength < bytesRecorded)
+        {
+            // 対になるバイトが無い末尾の1バイトはゲインを適用しようがないのでそのままコピーする。
+            outBuffer[pairedLength] = buffer[pairedLength];
+        }
+
+        return outBuffer;
+    }
+
+    /// <summary>
+    /// 16bit PCM (リトルエンディアン) のバイト列から、RMS 計算用の二乗和・Peak・サンプル数を
+    /// 集計する。AudioRecorder はチャンク (DataAvailable の1回分) ごとにこの戻り値を
+    /// インスタンスフィールド (_totalSamples / _sumSquared / _peak) へ積算していく。
+    /// Peak は結合則を満たすため、チャンクごとの最大値を後から Math.Max していく形でも、
+    /// 全サンプルを通しで見た場合と結果は変わらない。
+    /// ・bytesRecorded が奇数の場合、ApplyGain と同様に対になるバイトが無い末尾の1バイトは
+    ///   集計対象から除外する (範囲外アクセスの例外を避けるため)。
+    /// </summary>
+    internal static (long SampleCount, double SumSquared, float Peak) Aggregate(byte[] buffer, int bytesRecorded)
+    {
+        long sampleCount = 0;
+        double sumSquared = 0;
+        float peak = 0;
+
+        int pairedLength = bytesRecorded - (bytesRecorded % BytesPerSample);
+
+        for (int i = 0; i < pairedLength; i += BytesPerSample)
+        {
+            short sample = (short)((buffer[i + 1] << 8) | buffer[i]);
+            float sample32 = sample / 32768f;
+
+            float abs = Math.Abs(sample32);
+            if (abs > peak) peak = abs;
+
+            sumSquared += sample32 * sample32;
+            sampleCount++;
+        }
+
+        return (sampleCount, sumSquared, peak);
     }
 }

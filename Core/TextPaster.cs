@@ -51,7 +51,7 @@ public static class TextPaster
         var dispatcher = Application.Current?.Dispatcher;
         if (dispatcher == null)
         {
-            Console.WriteLine("Paste aborted: Application.Current is null.");
+            Logger.Error("Paste aborted: Application.Current is null.");
             return false;
         }
 
@@ -64,7 +64,7 @@ public static class TextPaster
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Clipboard backup failed: {ex.Message}");
+                Logger.Error("Clipboard backup failed", ex);
                 return null;
             }
         });
@@ -79,7 +79,7 @@ public static class TextPaster
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Clipboard SetText failed: {ex.Message}");
+                Logger.Error("Clipboard SetText failed", ex);
                 return false;
             }
         });
@@ -103,7 +103,7 @@ public static class TextPaster
             {
                 if (!SetForegroundWindow(targetHwnd))
                 {
-                    Console.WriteLine("Paste aborted: SetForegroundWindow failed.");
+                    Logger.Error("Paste aborted: SetForegroundWindow failed.");
                     return false;
                 }
 
@@ -112,7 +112,7 @@ public static class TextPaster
                 // 録音開始時と別のウィンドウに貼り付けてしまわないよう、送出直前に再確認する
                 if (GetForegroundWindow() != targetHwnd)
                 {
-                    Console.WriteLine("Paste aborted: foreground window changed before paste.");
+                    Logger.Error("Paste aborted: foreground window changed before paste.");
                     return false;
                 }
             }
@@ -149,7 +149,7 @@ public static class TextPaster
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Clipboard restore failed: {ex.Message}");
+                        Logger.Error("Clipboard restore failed", ex);
                     }
                 });
             }
