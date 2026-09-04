@@ -52,8 +52,12 @@ public class GroqProvider : IAiProvider
         var fileContent = new ByteArrayContent(audioBytes);
         fileContent.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
 
+        // モデル名は環境変数で上書き可能にする (GeminiProvider の GEMINI_MODEL と同様の方式)。
+        // 未設定の場合は従来どおりのモデルを既定値として使う。
+        string whisperModel = Environment.GetEnvironmentVariable("GROQ_WHISPER_MODEL") ?? "whisper-large-v3";
+
         multipart.Add(fileContent, "file", Path.GetFileName(audioFilePath));
-        multipart.Add(new StringContent("whisper-large-v3"), "model");
+        multipart.Add(new StringContent(whisperModel), "model");
         multipart.Add(new StringContent("ja"), "language");
         multipart.Add(new StringContent("0.0"), "temperature");
         multipart.Add(new StringContent("text"), "response_format");
@@ -81,9 +85,13 @@ public class GroqProvider : IAiProvider
         using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.groq.com/openai/v1/chat/completions");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
 
+        // モデル名は環境変数で上書き可能にする (GeminiProvider の GEMINI_MODEL と同様の方式)。
+        // 未設定の場合は従来どおりのモデルを既定値として使う。
+        string refineModel = Environment.GetEnvironmentVariable("GROQ_REFINE_MODEL") ?? "llama-3.3-70b-versatile";
+
         var payload = new
         {
-            model = "llama-3.3-70b-versatile",
+            model = refineModel,
             temperature = 0.0,
             messages = new object[]
             {

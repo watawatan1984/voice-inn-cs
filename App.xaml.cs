@@ -40,6 +40,16 @@ public partial class App : System.Windows.Application
     // 両方から読み書きされるため、volatile でスレッド間のメモリ可視性を保証する。
     private volatile bool _isProcessing = false;
 
+    // OnExit がアプリ終了時に、実行中の変換タスク (文字起こし: 最大60秒のネットワークI/O) の
+    // 完了を待ち合わせる/打ち切るために使用する。
+    // ・_shutdownCts: OnExit でキャンセルを通知する。Task.Run に渡すのではなく、
+    //   タスク内部で IsCancellationRequested を能動的にチェックする協調的キャンセルとして使う
+    //   (IAiProvider.TranscribeAsync は CancellationToken を受け取らないため、通信自体を
+    //   途中で打ち切ることはできない。あくまで通信完了後の後続処理を打ち切る)。
+    // ・_processingTask: OnExit が Task.Wait で完了を待ち合わせるための参照。
+    private readonly CancellationTokenSource _shutdownCts = new();
+    private Task? _processingTask;
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -205,7 +215,7 @@ public partial class App : System.Windows.Application
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"SetAppState の Dispatcher.Invoke に失敗しました: {ex.Message}");
+            Logger.Error("SetAppState の Dispatcher.Invoke に失敗しました", ex);
         }
     }
 
@@ -249,7 +259,7 @@ public partial class App : System.Windows.Application
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"OnAutoStop の Dispatcher.Invoke に失敗しました: {ex.Message}");
+            Logger.Error("OnAutoStop の Dispatcher.Invoke に失敗しました", ex);
         }
     }
 
@@ -273,7 +283,10 @@ public partial class App : System.Windows.Application
         _isProcessing = true;
         SetAppState("processing");
 
-        _ = Task.Run(async () =>
+        // OnExit がキャンセルを通知できるよう、トークンをタスク開始前にローカル変数へ捕捉する。
+        CancellationToken shutdownToken = _shutdownCts.Token;
+
+        _processingTask = Task.Run(async () =>
         {
             try
             {
@@ -331,6 +344,14 @@ public partial class App : System.Windows.Application
                     }
                 }
 
+                // アプリ終了要求後は、破棄済みリソース (NotifyIcon 等) やシャットダウン済み
+                // Dispatcher への操作を避けるため、貼り付け・履歴保存・オーバーレイ更新へは
+                // 進まずここで打ち切る。OnExit 側は _processingTask の完了を上限付きで待ち合わせる。
+                if (shutdownToken.IsCancellationRequested)
+                {
+                    return;
+                }
+
                 // 履歴保存
                 HistoryManager.Instance.AppendItem(text, null, currentProvider);
 
@@ -351,6 +372,12 @@ public partial class App : System.Windows.Application
             }
             catch (Exception ex)
             {
+                if (shutdownToken.IsCancellationRequested)
+                {
+                    // アプリ終了中はここで打ち切る (理由は上の成功系パスのコメントと同様)。
+                    return;
+                }
+
                 HistoryManager.Instance.AppendItem(string.Empty, ex.Message, SettingsManager.Instance.CurrentProvider);
                 SetAppState("error");
                 _notifyIcon?.ShowBalloonTip(3000, "Voice In 変換エラー", ex.Message, Forms.ToolTipIcon.Warning);
@@ -374,7 +401,7 @@ public partial class App : System.Windows.Application
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"ResetOverlayDelayed の継続処理に失敗しました: {ex.Message}");
+                Logger.Error("ResetOverlayDelayed の継続処理に失敗しました", ex);
             }
         });
     }
@@ -443,6 +470,11 @@ public partial class App : System.Windows.Application
         // シャットダウン自体は必ず継続させるため、OnExit 全体を try/catch で保護する。
         try
         {
+            // 実行中の変換タスク (最大60秒のネットワークI/O を含む) が _audioRecorder.Dispose() 等
+            // より後まで生き残ると、破棄済みリソースへのアクセスやシャットダウン済み Dispatcher への
+            // 操作が起こりうる。後片付けの前に、キャンセル通知と上限付きの完了待ちを試みる。
+            WaitForProcessingTaskBeforeCleanup();
+
             _keyboardHook.Dispose();
             _audioRecorder.Dispose();
 
@@ -466,11 +498,44 @@ public partial class App : System.Windows.Application
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"OnExit のクリーンアップ処理に失敗しました: {ex.Message}");
+            Logger.Error("OnExit のクリーンアップ処理に失敗しました", ex);
         }
         finally
         {
             base.OnExit(e);
+        }
+    }
+
+    /// <summary>
+    /// 実行中の変換タスク (_processingTask) にキャンセルを通知し、後片付け (Dispose 呼び出し) の
+    /// 前に、完了または打ち切りを上限付きで待つ。
+    /// アプリの終了自体がハングしないことを最優先とするため、
+    /// ・待機時間には上限を設ける (無期限に待たない)
+    /// ・タイムアウトした場合、タスクが例外で終わっていた場合のいずれも、ログに残すのみで
+    ///   例外は外へ投げず、呼び出し元 (OnExit) が後片付けを継続できるようにする
+    /// </summary>
+    private void WaitForProcessingTaskBeforeCleanup()
+    {
+        try
+        {
+            _shutdownCts.Cancel();
+
+            var task = _processingTask;
+            if (task == null || task.IsCompleted)
+            {
+                return;
+            }
+
+            if (!task.Wait(TimeSpan.FromSeconds(3)))
+            {
+                Logger.Warn("OnExit: 実行中の変換タスクの終了待機がタイムアウトしました。後片付けを続行します。");
+            }
+        }
+        catch (Exception ex)
+        {
+            // Task.Wait はタスクが例外で終わっていた場合に AggregateException を送出する。
+            // 後片付けは必ず継続させたいので、ここで捕捉してログに残すのみに留める。
+            Logger.Error("OnExit: 実行中の変換タスクの終了待機に失敗しました", ex);
         }
     }
 }

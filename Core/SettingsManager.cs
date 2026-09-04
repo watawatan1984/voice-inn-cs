@@ -37,13 +37,47 @@ public class SettingsManager
                 var loaded = JsonSerializer.Deserialize<AppSettings>(json, _jsonOptions);
                 if (loaded != null)
                 {
+                    FillMissingDictionaryDefaults(loaded);
                     Settings = loaded;
                 }
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Failed to load settings: {ex.Message}");
+            Logger.Error("Failed to load settings", ex);
+        }
+    }
+
+    /// <summary>
+    /// System.Text.Json は辞書型プロパティをセッター経由で丸ごと置換するため、settings.json に
+    /// 一部のキーしか書かれていないと (例: "app_categories": {"DEV": [...]})、既定値に存在する
+    /// 他のキー (BIZ/DOC/STD) が失われてしまう。移植元 Python 版の deep_merge_dict
+    /// (src/core/utils.py:24-33) 相当の処理として、既定値にのみ存在するキーを loaded 側へ
+    /// 補完する。ユーザーが明示的に設定したキーは上書きしない。
+    ///
+    /// Dictionary (ユーザー単語置換辞書) は対象外とする。ユーザーが意図的に空にしている
+    /// 可能性があり、既定値 (空辞書) との補完は意味を持たないため。
+    /// </summary>
+    private static void FillMissingDictionaryDefaults(AppSettings loaded)
+    {
+        var defaults = new AppSettings();
+
+        loaded.AppCategories ??= [];
+        foreach (var (key, value) in defaults.AppCategories)
+        {
+            if (!loaded.AppCategories.ContainsKey(key))
+            {
+                loaded.AppCategories[key] = value;
+            }
+        }
+
+        loaded.CategoryPrompts ??= [];
+        foreach (var (key, value) in defaults.CategoryPrompts)
+        {
+            if (!loaded.CategoryPrompts.ContainsKey(key))
+            {
+                loaded.CategoryPrompts[key] = value;
+            }
         }
     }
 
@@ -56,7 +90,7 @@ public class SettingsManager
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Failed to save settings: {ex.Message}");
+            Logger.Error("Failed to save settings", ex);
         }
     }
 
