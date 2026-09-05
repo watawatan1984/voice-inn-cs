@@ -85,6 +85,7 @@
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,18">
                         <RadioButton x:Name="RbGemini" Content="Gemini" GroupName="Provider" Checked="OnProviderChanged"/>
                         <RadioButton x:Name="RbGroq" Content="Groq" GroupName="Provider" Checked="OnProviderChanged"/>
+                        <RadioButton x:Name="RbLocal" Content="ローカル (オフライン)" GroupName="Provider" Checked="OnProviderChanged"/>
                     </StackPanel>
 
                     <!-- Gemini 用の入力欄 -->
@@ -138,6 +139,15 @@
 
                         <TextBlock Text="API キーの取得先: Groq Console (console.groq.com/keys) で発行できます。"
                                    TextWrapping="Wrap" Foreground="#A6ADC8" FontSize="12" Margin="0,0,0,10"/>
+                    </StackPanel>
+
+                    <!-- ローカル (オフライン) 用の案内 -->
+                    <StackPanel x:Name="PanelLocalFields" Visibility="Collapsed">
+                        <TextBlock Text="ローカル (オフライン) は、インターネット接続や API キーなしで、PC 上の Whisper モデルのみを使って文字起こしします。"
+                                   TextWrapping="Wrap" Foreground="#A6ADC8" FontSize="12" Margin="0,0,0,10"/>
+                        <TextBlock x:Name="LblLocalModelStatus" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,10"/>
+                        <TextBlock Text="モデルが未取得の場合は、セットアップ完了後にトレイメニューの「設定...」からダウンロードしてください。"
+                                   TextWrapping="Wrap" Foreground="#A6ADC8" FontSize="12"/>
                     </StackPanel>
                 </StackPanel>
 

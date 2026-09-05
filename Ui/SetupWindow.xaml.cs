@@ -1,6 +1,7 @@
 using System;
 using System.Windows;
 using System.Windows.Controls;
+using VoiceIn.Ai;
 using VoiceIn.Audio;
 using VoiceIn.Core;
 
@@ -52,10 +53,12 @@ public partial class SetupWindow : Window
         var settings = SettingsManager.Instance.Settings;
 
         // プロバイダ (未設定時は SettingsManager.CurrentProvider の既定値である gemini を選択)
-        string curProvider = SettingsManager.Instance.CurrentProvider;
-        bool groqSelected = curProvider.ToLowerInvariant() == "groq";
-        RbGemini.IsChecked = !groqSelected;
+        string curProvider = SettingsManager.Instance.CurrentProvider.ToLowerInvariant();
+        bool groqSelected = curProvider == "groq";
+        bool localSelected = curProvider == "local";
+        RbGemini.IsChecked = !groqSelected && !localSelected;
         RbGroq.IsChecked = groqSelected;
+        RbLocal.IsChecked = localSelected;
 
         // API キー: 設定済みでも実際の値は表示せず、ステータス表示のみ行う (SettingsWindow と同じ方針)
         InitializeApiKeyField(PwdGeminiApiKey, TxtGeminiApiKeyVisible, LblGeminiApiKeyStatus, "GEMINI_API_KEY");
@@ -116,11 +119,40 @@ public partial class SetupWindow : Window
         UpdateNavState();
     }
 
+    /// <summary>現在ラジオボタンで選択されているプロバイダ名 ("gemini"/"groq"/"local") を返す。</summary>
+    private string GetSelectedProvider()
+    {
+        if (RbGroq.IsChecked == true) return "groq";
+        if (RbLocal.IsChecked == true) return "local";
+        return "gemini";
+    }
+
     private void UpdateProviderPanels()
     {
-        bool geminiSelected = RbGemini.IsChecked == true;
-        PanelGeminiFields.Visibility = geminiSelected ? Visibility.Visible : Visibility.Collapsed;
-        PanelGroqFields.Visibility = geminiSelected ? Visibility.Collapsed : Visibility.Visible;
+        string provider = GetSelectedProvider();
+        PanelGeminiFields.Visibility = provider == "gemini" ? Visibility.Visible : Visibility.Collapsed;
+        PanelGroqFields.Visibility = provider == "groq" ? Visibility.Visible : Visibility.Collapsed;
+        PanelLocalFields.Visibility = provider == "local" ? Visibility.Visible : Visibility.Collapsed;
+
+        if (provider == "local")
+        {
+            // モデルのダウンロード状態はここで初めて必要になるため、表示するたびに反映する
+            // (ネットワーク I/O は行わない。ファイル存在確認のみ)。
+            RefreshLocalModelStatusText();
+        }
+    }
+
+    /// <summary>
+    /// ローカル (オフライン) 選択時に、現在のモデルサイズ設定がダウンロード済みかどうかを案内する。
+    /// ここではダウンロードそのものは行わせず (任意項目)、未取得なら設定画面へ誘導するに留める。
+    /// ModelDownloader.ModelExists はファイル存在確認のみでネットワーク I/O を行わない。
+    /// </summary>
+    private void RefreshLocalModelStatusText()
+    {
+        string modelSize = SettingsManager.Instance.Settings.Local.ModelSize;
+        LblLocalModelStatus.Text = ModelDownloader.ModelExists(modelSize)
+            ? $"現在のモデル設定 ({modelSize}) は既にダウンロード済みです。"
+            : $"現在のモデル設定 ({modelSize}) はまだダウンロードされていません。";
     }
 
     private void OnGeminiApiKeyPasswordChanged(object sender, RoutedEventArgs e) => OnApiKeyFieldChanged();
@@ -183,7 +215,14 @@ public partial class SetupWindow : Window
     /// </summary>
     private bool HasUsableApiKey()
     {
-        bool geminiSelected = RbGemini.IsChecked == true;
+        string provider = GetSelectedProvider();
+        if (provider == "local")
+        {
+            // ローカルは API キーが不要なため、常に「次へ」を許可する。
+            return true;
+        }
+
+        bool geminiSelected = provider == "gemini";
         string envKey = geminiSelected ? "GEMINI_API_KEY" : "GROQ_API_KEY";
         string input = geminiSelected
             ? ReadApiKeyInput(PwdGeminiApiKey, TxtGeminiApiKeyVisible)
@@ -233,8 +272,12 @@ public partial class SetupWindow : Window
 
     private void UpdateSummary()
     {
-        bool geminiSelected = RbGemini.IsChecked == true;
-        string providerLabel = geminiSelected ? "Gemini" : "Groq";
+        string providerLabel = GetSelectedProvider() switch
+        {
+            "groq" => "Groq",
+            "local" => "ローカル (オフライン)",
+            _ => "Gemini"
+        };
 
         string micLabel = CmbMicDevice.SelectedIndex <= 0
             ? "既定のデバイス"
@@ -285,8 +328,7 @@ public partial class SetupWindow : Window
         var settings = SettingsManager.Instance.Settings;
 
         // プロバイダ (setter が .env へも書き戻す)
-        bool geminiSelected = RbGemini.IsChecked == true;
-        SettingsManager.Instance.CurrentProvider = geminiSelected ? "gemini" : "groq";
+        SettingsManager.Instance.CurrentProvider = GetSelectedProvider();
 
         // API キー: 空欄のまま完了した場合は既存のキーを一切変更しない。
         // 実際に新しい値が入力されたときのみ、環境変数への即時反映と .env への書き戻しを行う

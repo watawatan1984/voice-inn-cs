@@ -117,19 +117,33 @@ public class LocalProvider : IAiProvider
     }
 
     /// <summary>
+    /// GGML モデルの既定の保存先ディレクトリを返す (EnvLoader.GetAppDataDirectory() 配下)。
+    /// Ai/ModelDownloader.cs (ダウンロード先の決定) や Ui/SettingsWindow (モデルの状態表示) からも
+    /// 同じ場所を参照できるよう、パス構築ロジックをここに一元化する
+    /// (重複させると、将来どちらか片方だけ変更されて食い違う恐れがあるため)。
+    /// </summary>
+    internal static string GetDefaultModelsDirectory() => Path.Combine(EnvLoader.GetAppDataDirectory(), ModelsSubDirectory);
+
+    /// <summary>
+    /// モデルサイズ名 (tiny/base/small/medium/large-v3 等) から GGML ファイル名を組み立てる。
+    /// whisper.cpp / Hugging Face 上の実際の命名規則 (ggml-{size}.bin) に合わせる。
+    /// </summary>
+    internal static string GetDefaultModelFileName(string modelSize) => $"ggml-{modelSize}.bin";
+
+    /// <summary>
     /// LocalSettings からモデルファイルの絶対パスを決定する。
     /// ModelPath が明示されていればそれを優先し、無ければ既定の保存先
     /// (EnvLoader.GetAppDataDirectory()\models\ggml-{ModelSize}.bin、ポータブルモードにも追従) から探す。
+    /// Ui/SettingsWindow (モデルの状態表示) からも同じ解決ロジックを再利用できるよう internal 公開する。
     /// </summary>
-    private static string ResolveModelPath(LocalSettings local)
+    internal static string ResolveModelPath(LocalSettings local)
     {
         if (!string.IsNullOrWhiteSpace(local.ModelPath))
         {
             return local.ModelPath;
         }
 
-        string modelsDir = Path.Combine(EnvLoader.GetAppDataDirectory(), ModelsSubDirectory);
-        return Path.Combine(modelsDir, $"ggml-{local.ModelSize}.bin");
+        return Path.Combine(GetDefaultModelsDirectory(), GetDefaultModelFileName(local.ModelSize));
     }
 
     /// <summary>

@@ -105,12 +105,15 @@ public partial class App : System.Windows.Application
 
         // 初回起動判定: GEMINI_API_KEY / GROQ_API_KEY のどちらも未設定ならセットアップウィザードを開く
         // (移植元 Python 版 src/main.py の check_first_run と同じ判定)。
+        // ただし、現在のプロバイダが "local" の場合は API キー自体が不要な運用のため、
+        // この判定には含めない (ローカル運用のユーザーが毎回ウィザードを開かれることを防ぐ)。
         // OnStartup の中で同期的に ShowDialog() を呼ぶと起動処理をブロックしてしまうため、
         // Dispatcher.BeginInvoke でメッセージループが回り始めてから (オーバーレイ表示・トレイアイコン
         // 初期化が完了した後) モードレスに Show() する。
+        bool isLocalProvider = SettingsManager.Instance.CurrentProvider.ToLowerInvariant() == "local";
         bool hasGeminiKey = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GEMINI_API_KEY"));
         bool hasGroqKey = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GROQ_API_KEY"));
-        if (!hasGeminiKey && !hasGroqKey)
+        if (!isLocalProvider && !hasGeminiKey && !hasGroqKey)
         {
             Dispatcher.BeginInvoke(new Action(OpenSetupWizard));
         }
@@ -154,12 +157,15 @@ public partial class App : System.Windows.Application
 
         var geminiItem = new Forms.ToolStripMenuItem("Gemini に切替", null, (s, e) => SwitchProvider("gemini"));
         var groqItem = new Forms.ToolStripMenuItem("Groq に切替", null, (s, e) => SwitchProvider("groq"));
+        var localItem = new Forms.ToolStripMenuItem("Local に切替", null, (s, e) => SwitchProvider("local"));
 
         if (provider.ToLowerInvariant() == "gemini") geminiItem.Checked = true;
         if (provider.ToLowerInvariant() == "groq") groqItem.Checked = true;
+        if (provider.ToLowerInvariant() == "local") localItem.Checked = true;
 
         menu.Items.Add(geminiItem);
         menu.Items.Add(groqItem);
+        menu.Items.Add(localItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
 
         menu.Items.Add("セットアップウィザード...", null, (s, e) => OpenSetupWizard());
@@ -324,7 +330,12 @@ public partial class App : System.Windows.Application
                 // (provider.TranscribeAsync) や await はロックの外で行う。
                 lock (SettingsLock.Gate)
                 {
-                    if (currentProvider == "groq")
+                    // "local" は Whisper.net でのオフライン文字起こし後、設定で有効な場合のみ
+                    // クラウド LLM (Groq) へ整形を委譲する (Ai/LocalProvider.cs のハイブリッド
+                    // モード参照)。渡すべきプロンプトは「音声を文字起こしせよ」という Gemini 用の
+                    // 指示ではなく、「文字起こし済みテキストを整形せよ」という Groq と同種の
+                    // 指示であるべきなので、"groq" と同じ分岐に合流させる。
+                    if (currentProvider == "groq" || currentProvider == "local")
                     {
                         promptText = useCategoryPrompt && settings.CategoryPrompts.TryGetValue(category, out var catPrompt)
                             ? catPrompt

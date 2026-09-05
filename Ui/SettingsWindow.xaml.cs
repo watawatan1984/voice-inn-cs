@@ -1,8 +1,12 @@
 using System;
 using System.Collections.ObjectModel;
 using System.Globalization;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using VoiceIn.Ai;
 using VoiceIn.Audio;
 using VoiceIn.Core;
 
@@ -33,19 +37,33 @@ public partial class SettingsWindow : Window
     private Dictionary<string, string> _categoryPromptsWorking = new();
     private string? _currentCategoryKey;
 
+    // ローカルモデルのダウンロード中にキャンセルを通知するためのトークンソース。
+    // ダウンロード中でないときは null。ウィンドウを閉じたときにも取りこぼさず
+    // キャンセルできるよう、Closed イベントでも参照する。
+    private CancellationTokenSource? _modelDownloadCts;
+
     public SettingsWindow()
     {
         InitializeComponent();
         LoadSettings();
+
+        // ウィンドウを閉じた後もバックグラウンドでダウンロードが走り続けないよう、
+        // 閉じた時点で確実にキャンセルする。
+        Closed += (s, e) => _modelDownloadCts?.Cancel();
     }
 
     private void LoadSettings()
     {
         var settings = SettingsManager.Instance.Settings;
 
-        // プロバイダ
+        // プロバイダ (gemini/groq/local の3択)
         string curProvider = SettingsManager.Instance.CurrentProvider;
-        CmbProvider.SelectedIndex = curProvider.ToLowerInvariant() == "groq" ? 1 : 0;
+        CmbProvider.SelectedIndex = curProvider.ToLowerInvariant() switch
+        {
+            "groq" => 1,
+            "local" => 2,
+            _ => 0
+        };
 
         // Gemini API キー: 設定済みでも実際の値は表示せず、ステータス表示のみ行う
         InitializeApiKeyField(PwdGeminiApiKey, TxtGeminiApiKeyVisible, LblGeminiApiKeyStatus, "GEMINI_API_KEY");
@@ -125,6 +143,191 @@ public partial class SettingsWindow : Window
         {
             CmbCategory.SelectedIndex = 0;
         }
+
+        // ローカル (オフライン) 設定
+        PopulateLocalModelSizeCombo();
+        SetLocalModelSizeSelection(settings.Local.ModelSize);
+        ChkLocalUseGpu.IsChecked = settings.Local.UseGpu;
+        ChkLocalRefineWithCloud.IsChecked = settings.Local.RefineWithCloud;
+        RefreshLocalModelStatus();
+    }
+
+    /// <summary>
+    /// ModelDownloader.SupportedModelSizes を唯一の情報源として、モデルサイズ選択コンボボックスの
+    /// 選択肢を組み立てる。表示テキストにおおよそのファイルサイズを併記し、実際の値
+    /// (tiny/base/small/medium/large-v3) は各項目の Tag に保持する (XAML 側にはサイズを
+    /// ハードコードしない)。
+    /// </summary>
+    private void PopulateLocalModelSizeCombo()
+    {
+        CmbLocalModelSize.Items.Clear();
+        foreach (var info in ModelDownloader.SupportedModelSizes)
+        {
+            CmbLocalModelSize.Items.Add(new ComboBoxItem
+            {
+                Content = $"{info.Id} ({info.ApproxSizeLabel})",
+                Tag = info.Id
+            });
+        }
+    }
+
+    /// <summary>
+    /// 指定したモデルサイズ名に対応する項目をコンボボックスで選択する。
+    /// 未知のサイズ名 (settings.json の手動編集等) の場合は既定値である "small" を選択する。
+    /// </summary>
+    private void SetLocalModelSizeSelection(string modelSize)
+    {
+        for (int i = 0; i < CmbLocalModelSize.Items.Count; i++)
+        {
+            if (CmbLocalModelSize.Items[i] is ComboBoxItem item &&
+                string.Equals(item.Tag as string, modelSize, StringComparison.OrdinalIgnoreCase))
+            {
+                CmbLocalModelSize.SelectedIndex = i;
+                return;
+            }
+        }
+
+        for (int i = 0; i < CmbLocalModelSize.Items.Count; i++)
+        {
+            if (CmbLocalModelSize.Items[i] is ComboBoxItem item &&
+                string.Equals(item.Tag as string, "small", StringComparison.OrdinalIgnoreCase))
+            {
+                CmbLocalModelSize.SelectedIndex = i;
+                return;
+            }
+        }
+    }
+
+    /// <summary>現在コンボボックスで選択されているモデルサイズ名 (tiny/base/small/medium/large-v3) を返す。</summary>
+    private string GetSelectedLocalModelSize()
+    {
+        return (CmbLocalModelSize.SelectedItem as ComboBoxItem)?.Tag as string ?? "small";
+    }
+
+    private void OnLocalModelSizeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        RefreshLocalModelStatus();
+    }
+
+    /// <summary>
+    /// 現在選択中のモデルサイズについて、実際に使われるパス (LocalSettings.ModelPath が
+    /// 明示されていればそれを優先し、無ければ既定の保存先) にモデルファイルが存在するかどうかを
+    /// 画面に反映する。ネットワーク I/O は一切行わない。
+    /// </summary>
+    private void RefreshLocalModelStatus()
+    {
+        string modelSize = GetSelectedLocalModelSize();
+        string? explicitPath = SettingsManager.Instance.Settings.Local.ModelPath;
+        string effectivePath = string.IsNullOrWhiteSpace(explicitPath)
+            ? ModelDownloader.GetModelFilePath(modelSize)
+            : explicitPath;
+
+        if (File.Exists(effectivePath))
+        {
+            LblLocalModelStatus.Text = $"モデルは見つかりました。\n{effectivePath}";
+            LblLocalModelStatus.Foreground = new System.Windows.Media.SolidColorBrush(Color.FromRgb(0xA6, 0xE3, 0xA1));
+        }
+        else
+        {
+            LblLocalModelStatus.Text = $"モデルが見つかりません。ダウンロードが必要です。\n(想定パス: {effectivePath})";
+            LblLocalModelStatus.Foreground = new System.Windows.Media.SolidColorBrush(Color.FromRgb(0xF3, 0x8B, 0xA8));
+        }
+    }
+
+    /// <summary>
+    /// モデルのダウンロードを実行する。実行前に「おおよそのサイズを提示して確認」「既に存在する
+    /// 場合は上書き確認」の 2 段階の確認を行い、進捗表示・キャンセル・完了後の状態表示更新までを
+    /// 一通り行う。ネットワーク I/O 自体は VoiceIn.Ai.ModelDownloader に委譲する。
+    /// async void だが UI イベントハンドラであり (WPF での唯一の正当な async void の用途)、
+    /// 例外は内部で全て catch して MessageBox 表示にとどめ、外へは決して漏らさない。
+    /// </summary>
+    private async void OnDownloadModel(object sender, RoutedEventArgs e)
+    {
+        string modelSize = GetSelectedLocalModelSize();
+        var sizeInfo = ModelDownloader.FindModelSizeInfo(modelSize);
+        string sizeLabel = sizeInfo?.ApproxSizeLabel ?? "不明なサイズ";
+
+        if (ModelDownloader.ModelExists(modelSize))
+        {
+            var overwriteResult = MessageBox.Show(
+                $"{modelSize} モデルは既定の保存先に既にダウンロード済みです。再ダウンロードして上書きしますか?",
+                "Voice In - モデルのダウンロード",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+            if (overwriteResult != MessageBoxResult.Yes)
+            {
+                return;
+            }
+        }
+
+        var confirmResult = MessageBox.Show(
+            $"{modelSize} モデル ({sizeLabel}) をダウンロードします。ネットワーク環境によっては数分かかる場合があります。よろしいですか?",
+            "Voice In - モデルのダウンロード",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question);
+        if (confirmResult != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        _modelDownloadCts = new CancellationTokenSource();
+        BtnDownloadModel.IsEnabled = false;
+        CmbLocalModelSize.IsEnabled = false;
+        BtnCancelModelDownload.Visibility = Visibility.Visible;
+        PbModelDownload.Visibility = Visibility.Visible;
+        PbModelDownload.Value = 0;
+        LblModelDownloadStatus.Visibility = Visibility.Visible;
+        LblModelDownloadStatus.Text = "ダウンロードを開始しています...";
+
+        // Progress<T>.Report は生成時 (=ここ、UI スレッド) にキャプチャした SynchronizationContext
+        // 上で実行されるため、追加の Dispatcher.Invoke なしでここから直接 UI 要素を更新できる。
+        var progress = new Progress<ModelDownloader.ModelDownloadProgress>(p =>
+        {
+            double approxTotal = p.TotalBytesApprox > 0 ? p.TotalBytesApprox : 1;
+            double ratio = Math.Min(0.99, p.BytesDownloaded / approxTotal);
+            PbModelDownload.Value = ratio * 100.0;
+            LblModelDownloadStatus.Text =
+                $"ダウンロード中... {FormatBytes(p.BytesDownloaded)} / 約{FormatBytes(p.TotalBytesApprox)} ({ratio * 100:F0}%)";
+        });
+
+        try
+        {
+            await ModelDownloader.DownloadModelAsync(modelSize, progress, _modelDownloadCts.Token);
+            PbModelDownload.Value = 100;
+            LblModelDownloadStatus.Text = "ダウンロードが完了しました。";
+            MessageBox.Show("モデルのダウンロードが完了しました。", "Voice In", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (OperationCanceledException)
+        {
+            LblModelDownloadStatus.Text = "ダウンロードをキャンセルしました。";
+        }
+        catch (Exception ex)
+        {
+            LblModelDownloadStatus.Text = "ダウンロードに失敗しました。";
+            MessageBox.Show($"モデルのダウンロードに失敗しました: {ex.Message}", "Voice In - エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            BtnDownloadModel.IsEnabled = true;
+            CmbLocalModelSize.IsEnabled = true;
+            BtnCancelModelDownload.Visibility = Visibility.Collapsed;
+            _modelDownloadCts?.Dispose();
+            _modelDownloadCts = null;
+            RefreshLocalModelStatus();
+        }
+    }
+
+    private void OnCancelModelDownload(object sender, RoutedEventArgs e)
+    {
+        _modelDownloadCts?.Cancel();
+    }
+
+    /// <summary>バイト数を MB/GB 単位の読みやすい文字列に整形する (表示専用、丸め誤差は許容する)。</summary>
+    private static string FormatBytes(long bytes)
+    {
+        const double Mb = 1024.0 * 1024.0;
+        const double Gb = Mb * 1024.0;
+        return bytes >= Gb ? $"{bytes / Gb:F2}GB" : $"{bytes / Mb:F1}MB";
     }
 
     private void OnDeleteDictItem(object sender, RoutedEventArgs e)
@@ -282,6 +485,11 @@ public partial class SettingsWindow : Window
 
         settings.Audio.AutoPaste = ChkAutoPaste.IsChecked ?? true;
         settings.ContextAwareEnabled = ChkContextAware.IsChecked ?? true;
+
+        // ローカル (オフライン) 設定
+        settings.Local.ModelSize = GetSelectedLocalModelSize();
+        settings.Local.UseGpu = ChkLocalUseGpu.IsChecked ?? true;
+        settings.Local.RefineWithCloud = ChkLocalRefineWithCloud.IsChecked ?? false;
 
         // プロンプト
         settings.Prompts.GeminiTranscribePrompt = TxtGeminiPrompt.Text;
