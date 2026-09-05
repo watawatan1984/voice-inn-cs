@@ -134,7 +134,7 @@ flowchart TD
 
         ProviderSelect -->|gemini| GeminiCall["Gemini REST API <br/> (Base64 Inline WAV + Prompt)"]
         ProviderSelect -->|groq| GroqWhisper["Groq Whisper API <br/> (wav -> Raw Text)"]
-        GroqWhisper --> GroqRefine["Groq LLaMA 3.3 API <br/> (Raw Text + System Prompt)"]
+        GroqWhisper --> GroqRefine["Groq LLM API <br/> (Raw Text + System Prompt)"]
 
         GeminiCall --> RawResult[整形済みテキスト]
         GroqRefine --> RawResult

@@ -42,7 +42,7 @@
 
 ```
 [話す: "えーっとパイソンでスクリプト書いてギットハブにプッシュしといて"]
-                 ⬇️ (Gemini 2.5 Flash / Groq LLaMA 3.3 による文脈解析)
+                 ⬇️ (Gemini 2.5 Flash / Groq LLM による文脈解析)
 [入力結果: "Pythonでスクリプトを作成し、GitHubへプッシュしてください。"]
 ```
 
@@ -88,7 +88,7 @@
 +-----------------------------------------------------------------------------------+
 |  [🎙️ ホットキー録音]       [🤖 ハイブリッドAI]       [⚡ 自動ペースト (AutoPaste)] |
 |   Left Alt 長押しで録音     Gemini 2.5 Flash /        アクティブアプリへ直接送信    |
-|   離すと自動推論開始        Groq (Whisper+LLaMA3.3)   フォーカス保全 & 修飾キー解除 |
+|   離すと自動推論開始        Groq (Whisper + LLM)     フォーカス保全 & 修飾キー解除 |
 +-----------------------------------------------------------------------------------+
 |  [🎯 コンテキスト認識]     [🛡️ リアルタイムVAD]     [📚 ユーザー強制辞書]         |
 |   DEV / BIZ / DOC / STD     無音・誤タッチ自動破棄    専門用語・固有名詞を          |
@@ -108,7 +108,7 @@
    - 録音時間が0.2秒未満の場合や、音声の RMS / Peak が閾値以下の場合は無音と判定し、API呼び出しを行わずに処理をキャンセル。誤爆時の無駄なAPI課金をゼロにします。
 4. **選べるデュアル AI プロバイダ**:
    - **Gemini**: 高精度かつ長文に強い最新モデル（デフォルト: `gemini-2.5-flash`）。WAVをBase64インライン送信。
-   - **Groq**: 超高速 Whisper Large v3 で音声認識後、LLaMA 3.3 70B Versatile で文章を校正・再構築。
+   - **Groq**: 超高速 Whisper Large v3 で音声認識後、LLM (既定 `openai/gpt-oss-120b`) で文章を校正・再構築。モデルは `.env` の `GROQ_REFINE_MODEL` で変更できます。
 5. **コンテキスト認識プロンプト最適化**:
    - `DEV`: VSCode, Cursor, ターミナル等を検知。IT用語の英語化・変数名スネークケース対応・簡潔な出力。
    - `BIZ`: Slack, Teams, メール等を検知。丁寧なビジネス敬語（です・ます調）と適切な改行。
@@ -133,7 +133,7 @@
 | **音声キャプチャ** | **NAudio** | 3.0.1 | Windows CoreAudio / MME / DirectSound を幅広くカバーするデファクトスタンダード。 |
 | **低レイヤ制御** | **Win32 API (P/Invoke)** | Windows 10/11 | `SetWindowsHookEx` (キー監視), `keybd_event` (キーストローク), `GetForegroundWindow` (ウィンドウ検知)。 |
 | **外部 AI** | **Google Gemini REST API** | v1beta | 音声データを直接インラインでマルチモーダル推論でき、超低レイテンシで高品質。 |
-| **外部 AI** | **Groq Cloud API** | OpenAI 互換 | LPU による圧倒的な推論速度（Whisper & LLaMA 3.3）。 |
+| **外部 AI** | **Groq Cloud API** | OpenAI 互換 | LPU による圧倒的な推論速度（Whisper + LLM）。 |
 | **テスト** | **xUnit** | 2.9.3 | .NET の標準的テストフレームワーク。モック不要な純粋関数設計により 125 件の単体テストを瞬時実行。 |
 
 ---
@@ -226,7 +226,7 @@ voice-inn-cs/
 │   ├── IAiProvider.cs           # プロバイダ共通インターフェース
 │   ├── AiProviderFactory.cs     # 動的プロバイダ生成ファクトリ
 │   ├── GeminiProvider.cs        # Google Gemini API 実装
-│   └── GroqProvider.cs          # Groq Whisper + LLaMA 3.3 実装
+│   └── GroqProvider.cs          # Groq Whisper + LLM 実装
 │
 ├── Audio/                       # 音声キャプチャサブシステム
 │   └── AudioRecorder.cs         # NAudio 録音制御 & AudioSampleProcessor (純粋関数)

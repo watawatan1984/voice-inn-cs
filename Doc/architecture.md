@@ -33,7 +33,7 @@ graph TB
             AiFactory[AiProviderFactory]
             IAi[<<interface>> IAiProvider]
             Gemini[GeminiProvider <br/> REST generateContent]
-            Groq[GroqProvider <br/> Whisper + LLaMA 3.3]
+            Groq[GroqProvider <br/> Whisper + LLM]
         end
 
         subgraph ContextModule ["コンテキスト & テキスト"]
@@ -163,7 +163,7 @@ sequenceDiagram
   - WAV 音声データを Base64 文字列化し、リクエスト JSON の `inline_data` として埋め込み。
 - **`GroqProvider`**:
   - 第1段階: `https://api.groq.com/openai/v1/audio/transcriptions` (MultipartFormData / `whisper-large-v3`) で素早く高精度な生テキストを取得。
-  - 第2段階: `https://api.groq.com/openai/v1/chat/completions` (JSON / `llama-3.3-70b-versatile`) でシステムプロンプトに従った高度な文章整形を実施。
+  - 第2段階: `https://api.groq.com/openai/v1/chat/completions` (JSON / 既定 `openai/gpt-oss-120b`、`GROQ_REFINE_MODEL` で変更可) でシステムプロンプトに従った高度な文章整形を実施。
 
 ---
 

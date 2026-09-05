@@ -104,8 +104,17 @@ public class GroqProvider : IAiProvider
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
 
         // モデル名は環境変数で上書き可能にする (GeminiProvider の GEMINI_MODEL と同様の方式)。
-        // 未設定の場合は従来どおりのモデルを既定値として使う。
-        string refineModel = Environment.GetEnvironmentVariable("GROQ_REFINE_MODEL") ?? "llama-3.3-70b-versatile";
+        //
+        // 既定値について: 以前は llama-3.3-70b-versatile を使っていたが、Groq 側で提供が
+        // 終了しており "model_not_found" (404) で整形が必ず失敗する状態になっていた。
+        // Groq のモデル一覧 API で実際に利用可能なモデルを確認し、この用途 (音声認識テキストの
+        // 整形) で実際に試したうえで openai/gpt-oss-120b を既定とした。
+        //
+        // qwen/qwen3.8-27b はおよそ 3 倍高速だが、整形結果にマークダウンのバッククォートを
+        // 挿入することがある。このツールは任意のアプリへプレーンテキストとして貼り付けるため、
+        // 記号がそのまま混入するのは不具合になる。速度より出力の素直さを優先した。
+        // 速度を重視する場合は GROQ_REFINE_MODEL で切り替えられる。
+        string refineModel = Environment.GetEnvironmentVariable("GROQ_REFINE_MODEL") ?? "openai/gpt-oss-120b";
 
         var payload = new
         {
