@@ -23,6 +23,27 @@ public class CategoryKeywordEntry
     public string Keyword { get; set; } = string.Empty;
 }
 
+/// <summary>
+/// 「検出済みアプリ履歴」一覧 (GridDetectedApps) の表示用モデル。
+/// AppSettings.DetectedApps (Dictionary&lt;string, DetectedAppInfo&gt;) の 1 エントリを
+/// 画面表示しやすい形に変換したものであり、settings 本体への書き戻しには使わない
+/// (書き戻しは OnAssignDetectedAppCategory / OnClearDetectedApps が直接 settings を操作する)。
+/// </summary>
+public class DetectedAppEntry
+{
+    public string AppName { get; set; } = string.Empty;
+    public string AutoCategory { get; set; } = string.Empty;
+
+    /// <summary>UserCategory が未設定の場合の表示用プレースホルダーを含んだ表示文字列。</summary>
+    public string UserCategoryDisplay { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 検出時のウィンドウタイトルの例。プライバシー注意: 文書名・チャット相手の名前などを
+    /// 含みうる値であり、Core/Logger には絶対に渡さないこと (このプロパティ自体は画面表示専用)。
+    /// </summary>
+    public string TitleSample { get; set; } = string.Empty;
+}
+
 public partial class SettingsWindow : Window
 {
     public event Action? SettingsSaved;
@@ -36,6 +57,11 @@ public partial class SettingsWindow : Window
     private Dictionary<string, List<string>> _categoryKeywordsWorking = new();
     private Dictionary<string, string> _categoryPromptsWorking = new();
     private string? _currentCategoryKey;
+
+    // 検出済みアプリ履歴 (GridDetectedApps) の表示用コレクション。分類キーワード/プロンプトと
+    // 異なり、この一覧は「保存して適用」を待たずに SettingsManager.Instance.Settings を
+    // 直接読み書きする (詳細は LoadDetectedApps / OnAssignDetectedAppCategory 参照)。
+    private readonly ObservableCollection<DetectedAppEntry> _detectedAppEntries = [];
 
     // ローカルモデルのダウンロード中にキャンセルを通知するためのトークンソース。
     // ダウンロード中でないときは null。ウィンドウを閉じたときにも取りこぼさず
@@ -143,6 +169,20 @@ public partial class SettingsWindow : Window
         {
             CmbCategory.SelectedIndex = 0;
         }
+
+        // 検出済みアプリ履歴の割り当て先コンボボックス。キーワード編集用の CmbCategory と
+        // 同じカテゴリ一覧を使うが、選択が連動すると紛らわしいため独立したコントロールにする。
+        CmbAssignCategory.Items.Clear();
+        foreach (var categoryKey in _categoryKeywordsWorking.Keys)
+        {
+            CmbAssignCategory.Items.Add(categoryKey);
+        }
+        if (CmbAssignCategory.Items.Count > 0)
+        {
+            CmbAssignCategory.SelectedIndex = 0;
+        }
+
+        LoadDetectedApps();
 
         // ローカル (オフライン) 設定
         PopulateLocalModelSizeCombo();
@@ -406,6 +446,178 @@ public partial class SettingsWindow : Window
         {
             _categoryKeywordEntries.Remove(selected);
         }
+    }
+
+    /// <summary>
+    /// SettingsManager.Instance.Settings.DetectedApps (検出済みアプリ履歴) を画面の一覧
+    /// (GridDetectedApps) へ読み込む。ウィンドウを開いたときに加え、カテゴリ割り当て・
+    /// 履歴クリアの直後にも呼び、画面へ即座に反映する。
+    ///
+    /// 分類キーワード/カテゴリ別プロンプトの編集 (_categoryKeywordsWorking 等) と異なり、
+    /// この一覧は「保存して適用」を待たない (OnAssignDetectedAppCategory / OnClearDetectedApps
+    /// が直接 settings を読み書きして即座に保存するため、常に最新の実データを表示する)。
+    /// </summary>
+    private void LoadDetectedApps()
+    {
+        var settings = SettingsManager.Instance.Settings;
+
+        KeyValuePair<string, DetectedAppInfo>[] snapshot;
+        lock (SettingsLock.Gate)
+        {
+            settings.DetectedApps ??= [];
+            snapshot = settings.DetectedApps.ToArray();
+        }
+
+        _detectedAppEntries.Clear();
+        foreach (var (appName, info) in snapshot.OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            _detectedAppEntries.Add(new DetectedAppEntry
+            {
+                AppName = appName,
+                AutoCategory = info.AutoCategory,
+                UserCategoryDisplay = string.IsNullOrEmpty(info.UserCategory) ? "(未割り当て)" : info.UserCategory,
+                TitleSample = info.TitleSample
+            });
+        }
+
+        GridDetectedApps.ItemsSource = _detectedAppEntries;
+    }
+
+    /// <summary>
+    /// カテゴリ割り当ての中核処理 (SettingsManager や WPF に依存しない、テスト可能な純粋処理)。
+    /// 移植元 Python 版 (src/ui/settings.py:709-745) と同じく、以下をまとめて行う:
+    /// (1) settings.DetectedApps[appName].user_category に targetCategory を設定する
+    ///     (既存インスタンスは書き換えず、新しいインスタンスで丸ごと差し替える方式)。
+    /// (2) appName を小文字化したうえで、settings.AppCategories[targetCategory] の
+    ///     キーワード一覧へ追加する (大文字小文字を無視した重複チェック付き)。
+    /// 両方とも SettingsLock.Gate の下、辞書の参照・小さな値の代入のみで完結させ、
+    /// ファイル I/O は一切行わない (呼び出し側が SettingsManager.Instance.Save() を別途行う)。
+    /// internal であり、Ui/SettingsWindow を WPF ホスト無しにインスタンス化できないテストからも、
+    /// この静的メソッド単体としてなら直接呼び出して検証できる。
+    /// </summary>
+    internal static void ApplyDetectedAppCategoryAssignment(AppSettings settings, string appName, string targetCategory)
+    {
+        string lowerAppName = appName.ToLowerInvariant();
+
+        lock (SettingsLock.Gate)
+        {
+            settings.DetectedApps ??= [];
+            if (settings.DetectedApps.TryGetValue(appName, out var existing))
+            {
+                // 既存インスタンスのフィールドを直接書き換えるのではなく、新しいインスタンスで
+                // 丸ごと差し替える (このロックの外で同じ辞書を読む Core.WindowDetector 側との
+                // 一貫性を保つための、このコードベース全体で使われている方式)。
+                settings.DetectedApps[appName] = new DetectedAppInfo
+                {
+                    TitleSample = existing.TitleSample,
+                    AutoCategory = existing.AutoCategory,
+                    UserCategory = targetCategory
+                };
+            }
+
+            if (!settings.AppCategories.TryGetValue(targetCategory, out var keywordList))
+            {
+                keywordList = [];
+                settings.AppCategories[targetCategory] = keywordList;
+            }
+
+            bool alreadyPresent = keywordList.Any(k => string.Equals(k, lowerAppName, StringComparison.OrdinalIgnoreCase));
+            if (!alreadyPresent)
+            {
+                keywordList.Add(lowerAppName);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 選択したアプリへカテゴリを割り当てる。移植元 Python 版 (src/ui/settings.py:709-745) と
+    /// 同じく、(1) detected_apps[アプリ名].user_category を設定し、(2) アプリ名を小文字化して
+    /// そのカテゴリのキーワード一覧へ追加する (大文字小文字を無視した重複チェック付き) を
+    /// まとめて行い、即座に SettingsManager.Instance.Save() で保存する。
+    ///
+    /// このウィンドウの他の編集 (分類キーワード・カテゴリ別プロンプト) は「保存して適用」
+    /// (OnSaveAndApply) を押すまで settings 本体には反映されず、_categoryKeywordsWorking /
+    /// _categoryPromptsWorking に退避されるだけである。一方この割り当て操作は、移植元と同じく
+    /// 「割り当てたら即座に保存される」独立した操作として扱う。そのため、後で
+    /// 「保存して適用」が押されたときに settings.AppCategories が _categoryKeywordsWorking の
+    /// (この割り当てを知らない) 古い内容で丸ごと上書きされ、ここで追加したキーワードが
+    /// 消えてしまわないよう、_categoryKeywordsWorking (および画面に表示中であればキーワード
+    /// 編集グリッドの内容) にも同じキーワード追加を反映しておく。
+    /// </summary>
+    private void OnAssignDetectedAppCategory(object sender, RoutedEventArgs e)
+    {
+        if (GridDetectedApps.SelectedItem is not DetectedAppEntry selected)
+        {
+            MessageBox.Show("カテゴリを割り当てるアプリを選択してください。", "Voice In", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        if (CmbAssignCategory.SelectedItem is not string targetCategory || string.IsNullOrWhiteSpace(targetCategory))
+        {
+            MessageBox.Show("割り当て先のカテゴリを選択してください。", "Voice In", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var settings = SettingsManager.Instance.Settings;
+        string lowerAppName = selected.AppName.ToLowerInvariant();
+
+        ApplyDetectedAppCategoryAssignment(settings, selected.AppName, targetCategory);
+
+        SettingsManager.Instance.Save();
+
+        // 「保存して適用」待ちのステージ済みコピーにも反映する (反映しないと、この後
+        // 「保存して適用」を押したときに settings.AppCategories が古い _categoryKeywordsWorking
+        // の内容で丸ごと上書きされ、今追加したキーワードが失われてしまう)。
+        if (!_categoryKeywordsWorking.TryGetValue(targetCategory, out var workingList))
+        {
+            workingList = [];
+            _categoryKeywordsWorking[targetCategory] = workingList;
+        }
+        if (!workingList.Any(k => string.Equals(k, lowerAppName, StringComparison.OrdinalIgnoreCase)))
+        {
+            workingList.Add(lowerAppName);
+        }
+
+        // 現在キーワード編集グリッドに表示中のカテゴリと一致する場合は、画面にも即座に反映する。
+        if (_currentCategoryKey == targetCategory &&
+            !_categoryKeywordEntries.Any(k => string.Equals(k.Keyword, lowerAppName, StringComparison.OrdinalIgnoreCase)))
+        {
+            _categoryKeywordEntries.Add(new CategoryKeywordEntry { Keyword = lowerAppName });
+        }
+
+        LoadDetectedApps();
+
+        MessageBox.Show($"「{selected.AppName}」を {targetCategory} に割り当てました。", "Voice In", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    /// <summary>
+    /// 検出済みアプリ履歴を全件削除する。取り消せない操作のため、既存の履歴ウィンドウ
+    /// (Ui/HistoryWindow.OnDeleteAll) と同じ方針で確認ダイアログを出し、既定ボタンを
+    /// 「いいえ」にすることで誤操作を防ぐ。
+    /// </summary>
+    private void OnClearDetectedApps(object sender, RoutedEventArgs e)
+    {
+        var result = MessageBox.Show(
+            "検出済みアプリ履歴をすべて削除します。この操作は取り消せません。よろしいですか?",
+            "Voice In",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (result != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        var settings = SettingsManager.Instance.Settings;
+        lock (SettingsLock.Gate)
+        {
+            settings.DetectedApps ??= [];
+            settings.DetectedApps.Clear();
+        }
+
+        SettingsManager.Instance.Save();
+        LoadDetectedApps();
     }
 
     private void OnSaveAndApply(object sender, RoutedEventArgs e)

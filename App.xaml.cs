@@ -62,6 +62,14 @@ public partial class App : System.Windows.Application
         // 環境変数読み込み (.env)
         EnvLoader.Load();
 
+        // 新しいアプリを検出したときに settings.json へ永続化する手段を WindowDetector へ渡す。
+        // WindowDetector (Core 層) が SettingsManager.Instance を直接呼ぶ設計にすると、
+        // 素の AppSettings を渡して DetectCategory を呼ぶテストからも Instance への初回アクセスが
+        // 発生し、実ユーザーの %AppData%\VoiceIn が作られてしまう。そのため保存手段は注入とし、
+        // 本番であるここでのみ配線する。
+        // 【注意】この 1 行を消すと、検出済みアプリ履歴が保存されなくなる (無言で効かなくなる)。
+        WindowDetector.SaveSettingsCallback = _ => SettingsManager.Instance.Save();
+
         // 起動時クリーンアップ: 前回までのクラッシュ・強制終了・電源断で消せなかった
         // 古い一時 WAV ファイル (%TEMP%\voicein_*.wav、ユーザーの生の音声データを含む) を
         // バックグラウンドで削除する。起動処理を遅延させないよう Task.Run で非同期に行い、

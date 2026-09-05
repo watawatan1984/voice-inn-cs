@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Voice In 設定"
-        Width="640" Height="520"
+        Width="640" Height="740"
         WindowStartupLocation="CenterScreen"
         Background="#1E1E2E"
         Foreground="#CDD6F4"
@@ -275,6 +275,9 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="1.3*"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="150"/>
+                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
                     <TextBlock Grid.Row="0" Text="アクティブウィンドウの分類に使うキーワードと、カテゴリ別のプロンプトを編集します。" TextWrapping="Wrap" Margin="0,0,0,10"/>
@@ -302,6 +305,40 @@
                     <TextBlock Grid.Row="5" Text="カテゴリ別プロンプト (このカテゴリのウィンドウで文字起こしする際に使う追加指示):" FontWeight="Bold" Margin="0,0,0,6"/>
 
                     <TextBox x:Name="TxtCategoryPrompt" Grid.Row="6" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
+
+                    <!-- 検出済みアプリ履歴。移植元 Python 版の「検出済みアプリ」パネル相当。
+                         ユーザーが普段使うアプリがどの名前・カテゴリで認識されているかを確認し、
+                         キーワードとして何を追加すればよいかの手掛かりを得るための一覧。 -->
+                    <StackPanel Grid.Row="7" Margin="0,14,0,6">
+                        <TextBlock Text="検出済みアプリ履歴" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <TextBlock TextWrapping="Wrap" Foreground="#A6ADC8" FontSize="11"
+                                   Text="アクティブウィンドウを検出するたびに、まだ一覧に無いアプリ名だけが自動的に追加されます (発話のたびにファイルへ書き込むことはありません)。アプリ名・自動判定カテゴリに加えて、検出時のウィンドウタイトルの例も設定ファイルに保存されます。ウィンドウタイトルには文書名やメールの件名、チャット相手の名前などが含まれる場合がある点にご注意ください。下の一覧からアプリを選んでカテゴリを割り当てると、そのカテゴリのキーワードにも自動的に追加されます。"/>
+                    </StackPanel>
+
+                    <DataGrid x:Name="GridDetectedApps" Grid.Row="8" AutoGenerateColumns="False"
+                              Background="#313244" Foreground="#CDD6F4" CanUserAddRows="False" IsReadOnly="True"
+                              SelectionMode="Single" Margin="0,0,0,8">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="アプリ名" Binding="{Binding AppName}" Width="*"/>
+                            <DataGridTextColumn Header="自動判定" Binding="{Binding AutoCategory}" Width="Auto"/>
+                            <DataGridTextColumn Header="現在の割り当て" Binding="{Binding UserCategoryDisplay}" Width="Auto"/>
+                            <DataGridTextColumn Header="検出時のタイトル例 (保存されます)" Binding="{Binding TitleSample}" Width="2*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <Grid Grid.Row="9">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="140"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="割り当て先:" Margin="0,0,8,0"/>
+                        <ComboBox x:Name="CmbAssignCategory" Grid.Column="1"/>
+                        <Button Grid.Column="2" Content="カテゴリを割り当て" Click="OnAssignDetectedAppCategory" Margin="8,0,0,0"/>
+                        <Button Grid.Column="4" Content="履歴をクリア" Click="OnClearDetectedApps" Background="#F38BA8" Foreground="#11111B"/>
+                    </Grid>
                 </Grid>
             </TabItem>
         </TabControl>

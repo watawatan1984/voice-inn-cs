@@ -115,6 +115,35 @@ public class LocalSettings
     public string? ModelPath { get; set; } = null;
 }
 
+/// <summary>
+/// コンテキスト認識機能がアクティブウィンドウを検出した際に記録する「検出済みアプリ」1件分。
+/// 移植元 Python 版の detected_apps (src/core/config.py:89, src/core/context_prompt.py:207-219)
+/// に対応する。ユーザーはこの情報を設定画面の「カテゴリ」タブで確認し、
+/// キーワードを追加すべきアプリ名を知る手掛かりとして使う。
+/// </summary>
+public class DetectedAppInfo
+{
+    /// <summary>
+    /// 検出時のウィンドウタイトルの例。
+    /// 【プライバシー注意】ウィンドウタイトルには文書名・メールの件名・チャット相手の名前などが
+    /// 含まれうる。呼び出し側はこの値を絶対にログ (Core/Logger) へ書かないこと。
+    /// </summary>
+    [JsonPropertyName("title_sample")]
+    public string TitleSample { get; set; } = string.Empty;
+
+    /// <summary>検出時点でのキーワードによる自動判定カテゴリ (DEV/BIZ/DOC/STD)。</summary>
+    [JsonPropertyName("auto_category")]
+    public string AutoCategory { get; set; } = "STD";
+
+    /// <summary>
+    /// ユーザーが設定画面で明示的に割り当てたカテゴリ。未割り当ての場合は null。
+    /// 非 null の場合、Core/WindowDetector.DetectCategory はキーワードによる自動判定より
+    /// これを優先して返す (移植元 Python 版の get_effective_category, context_prompt.py:233-240 相当)。
+    /// </summary>
+    [JsonPropertyName("user_category")]
+    public string? UserCategory { get; set; } = null;
+}
+
 public class AppSettings
 {
     [JsonPropertyName("audio")]
@@ -134,6 +163,16 @@ public class AppSettings
 
     [JsonPropertyName("context_aware_enabled")]
     public bool ContextAwareEnabled { get; set; } = true;
+
+    /// <summary>
+    /// コンテキスト認識で検出されたアプリの履歴。キーはアプリ名 (WindowInfo.ProcessName)。
+    /// 既存の settings.json にこのキーが無い場合 (移植前の設定ファイル) でも、この既定値
+    /// (空辞書) によりそのまま動作する。書き込みは Core/WindowDetector.DetectCategory
+    /// (新規アプリ検出時のみ) と Ui/SettingsWindow (カテゴリ割り当て・履歴クリア) から行われ、
+    /// いずれも Core/SettingsLock.Gate の下で保護すること。
+    /// </summary>
+    [JsonPropertyName("detected_apps")]
+    public Dictionary<string, DetectedAppInfo> DetectedApps { get; set; } = [];
 
     [JsonPropertyName("app_categories")]
     public Dictionary<string, List<string>> AppCategories { get; set; } = new()
