@@ -26,8 +26,47 @@ public class AudioRecorder : IDisposable
     // input_gain_db (dB) を線形倍率に変換した値。1.0 (0dB) のときは無操作。
     private double _gainMultiplier = 1.0;
 
+    // ==== マイク入力レベルの「モニタリング」(設定画面・セットアップウィザードのマイクテスト用) ====
+    // 録音 (Start/Stop, _waveIn/_writer) とは完全に別系統の WaveIn を使う。ファイルへは
+    // 一切書き込まず、ゲイン適用後の RMS だけをフィールドへ保持する。UI 側はタイマーで
+    // CurrentMonitoringRms を読み取ってバー表示を更新する (キャプチャスレッドのコールバックから
+    // 直接 UI を触らない)。
+    private WaveIn? _monitorWaveIn;
+    private readonly object _monitorLock = new();
+    private double _monitorRms;
+    private double _monitorGainMultiplier = 1.0;
+
+    // ==== プロセス内の複数インスタンスをまたいだ「録音とモニタリングの排他制御」 ====
+    // App.xaml.cs は録音用に AudioRecorder のインスタンスを1つだけ保持しており (private フィールド、
+    // コンストラクタは引数なしで SettingsWindow/SetupWindow を生成する)、これらのウィンドウが
+    // マイクテスト用に生成する AudioRecorder は必然的に「別インスタンス」になる
+    // (App.xaml.cs 側の呼び出しを変更してインスタンスを共有させることができないため)。
+    // そのため、インスタンスフィールドの IsRecording / IsMonitoring だけでは
+    // 「設定画面でマイクテスト中でも、ホットキーによる録音 (App 側の別インスタンス) は必ず動く」
+    // 「録音がプロセス内のどこかで始まったら、他インスタンスのモニタリングも道連れで停止する」
+    // という要件を満たせない。AudioRecorder 型が持つ static な登録簿を介して、
+    // 同一プロセス内のインスタンスをまたいだ排他制御を行う。
+    // ・登録簿の出入りは Start/Stop/StartMonitoring/StopMonitoring からのみ行われ、
+    //   いずれも s_crossInstanceLock を取っている間は参照の Add/Remove/件数確認のみで
+    //   即座に終わる (デバイスのオープン/クローズ自体はロックの外で行う)。
+    private static readonly object s_crossInstanceLock = new();
+    private static readonly HashSet<AudioRecorder> s_recordingInstances = new();
+    private static readonly HashSet<AudioRecorder> s_monitoringInstances = new();
+
     public bool IsRecording { get; private set; }
+    public bool IsMonitoring { get; private set; }
     public event Action? AutoStopRequested;
+
+    /// <summary>
+    /// モニタリング中の現在の RMS 値 (概ね 0.0〜1.0 の範囲、入力ゲイン適用後)。
+    /// モニタリングしていないときは 0.0。NAudio のキャプチャコールバック (別スレッド) から
+    /// ロックの下で書き込まれる。UI 側はこれをタイマーでポーリングして表示を更新する想定であり、
+    /// このプロパティ自体はイベントを発火しない (コールバックから直接 UI を更新させないため)。
+    /// </summary>
+    public double CurrentMonitoringRms
+    {
+        get { lock (_monitorLock) { return _monitorRms; } }
+    }
 
     public AudioRecorder()
     {
@@ -51,6 +90,24 @@ public class AudioRecorder : IDisposable
         if (IsRecording)
         {
             return;
+        }
+
+        // モニタリング (マイクテスト) が動作中だと同じデバイスの二重オープンで録音の
+        // StartRecording() が失敗しうる。録音はこのアプリの主機能であり失敗させてはならないため、
+        // 録音開始時にモニタリングを自動的に止めてからデバイスを解放する。
+        // SettingsWindow/SetupWindow はマイクテスト用に自分自身とは別の AudioRecorder インスタンスを
+        // 持つため (クラス冒頭の static フィールド群のコメント参照)、自分自身だけでなく
+        // プロセス内の他インスタンスのモニタリングも道連れで停止する。
+        // StopMonitoring() 自体は例外を投げないベストエフォート実装。
+        StopMonitoring();
+        List<AudioRecorder> otherMonitors;
+        lock (s_crossInstanceLock)
+        {
+            otherMonitors = new List<AudioRecorder>(s_monitoringInstances);
+        }
+        foreach (var monitor in otherMonitors)
+        {
+            monitor.StopMonitoring();
         }
 
         Cleanup();
@@ -98,6 +155,7 @@ public class AudioRecorder : IDisposable
 
             waveIn.StartRecording();
             IsRecording = true;
+            lock (s_crossInstanceLock) { s_recordingInstances.Add(this); }
         }
         catch
         {
@@ -186,6 +244,139 @@ public class AudioRecorder : IDisposable
         _recordingStoppedSignal.Set();
     }
 
+    /// <summary>
+    /// ファイルへの書き込みを一切行わず、マイク入力レベル (RMS) だけを監視する
+    /// 「モニタリング」を開始する。設定画面・セットアップウィザードの「マイクテスト」機能から使う。
+    ///
+    /// ・録音 (Start/Stop) とは完全に独立した別の WaveIn インスタンス (_monitorWaveIn) を使う。
+    /// ・inputGainDb は録音時 (Start) と同じ AudioSampleProcessor.DbToLinearGain で線形倍率に変換し、
+    ///   コールバック内で AudioSampleProcessor.ApplyGain 相当のゲインを適用してから RMS を計算する
+    ///   (メーターは「実際に録音される音量」を示す必要があるため。詳細は ComputeRms 参照)。
+    ///   明示指定が無ければ Start() と同じく設定 (SettingsManager) から読む。
+    /// ・録音中に呼び出された場合は、同じデバイスの二重オープンによる失敗を避けるため、
+    ///   録音を止めることはせず、モニタリング開始そのものを拒否する。呼び出し元が
+    ///   「開始できなかったこと」に気付けるよう、黙って失敗せず例外を投げる。
+    ///   ここでいう「録音中」は自分自身のインスタンスに限らない。SettingsWindow/SetupWindow は
+    ///   マイクテスト用に App.xaml.cs の録音用インスタンスとは別の AudioRecorder を持つため、
+    ///   プロセス内の他インスタンスが録音中かどうかも static な登録簿で確認する
+    ///   (詳細はクラス冒頭の static フィールド群のコメント参照)。
+    /// </summary>
+    /// <exception cref="InvalidOperationException">プロセス内のいずれかのインスタンスが録音中に呼び出された場合。</exception>
+    public void StartMonitoring(int? deviceIndex = null, double? inputGainDb = null)
+    {
+        if (IsRecording)
+        {
+            throw new InvalidOperationException("録音中はマイクレベルのモニタリングを開始できません。");
+        }
+
+        lock (s_crossInstanceLock)
+        {
+            if (s_recordingInstances.Count > 0)
+            {
+                throw new InvalidOperationException("録音中はマイクレベルのモニタリングを開始できません。");
+            }
+        }
+
+        // 既にモニタリング中であれば、一旦止めてから (デバイス変更等に対応するため) 開始し直す。
+        StopMonitoring();
+
+        double gainDb = inputGainDb ?? SettingsManager.Instance.Settings.Audio.InputGainDb;
+        double gainMultiplier = AudioSampleProcessor.DbToLinearGain(gainDb);
+
+        WaveIn? waveIn = null;
+        try
+        {
+            waveIn = new WaveIn
+            {
+                WaveFormat = new WaveFormat(44100, 16, 1) // 44.1kHz, 16bit, Mono (Start() と同じ)
+            };
+
+            if (deviceIndex.HasValue && deviceIndex.Value >= 0 && deviceIndex.Value < WaveIn.DeviceCount)
+            {
+                waveIn.DeviceNumber = deviceIndex.Value;
+            }
+
+            _monitorGainMultiplier = gainMultiplier;
+            lock (_monitorLock) { _monitorRms = 0.0; }
+
+            waveIn.DataAvailable += OnMonitorDataAvailable;
+
+            waveIn.StartRecording();
+
+            _monitorWaveIn = waveIn;
+            IsMonitoring = true;
+            lock (s_crossInstanceLock) { s_monitoringInstances.Add(this); }
+        }
+        catch
+        {
+            // マイクが他アプリで使用中・無効化されている等で失敗した場合、確保しかけた
+            // WaveIn を必ず解放してから呼び出し元 (Ui) へ例外を再スローする
+            // (Start() の失敗時ハンドリングと同じ方針)。呼び出し元 (SettingsWindow/SetupWindow) は
+            // これを catch して「何が起きたか分かるメッセージ」を表示すること。
+            if (waveIn != null)
+            {
+                waveIn.DataAvailable -= OnMonitorDataAvailable;
+                waveIn.Dispose();
+            }
+            _monitorWaveIn = null;
+            IsMonitoring = false;
+            throw;
+        }
+    }
+
+    private void OnMonitorDataAvailable(object? sender, WaveInEventArgs e)
+    {
+        // 【プライバシー・最重要】ここで受け取る音声データはレベル (RMS) の計算にのみ使う。
+        // ファイルへの書き込み・ログ出力は一切行わない (このメソッドはそれ以外の副作用を持たない)。
+        double rms = AudioSampleProcessor.ComputeRms(e.Buffer, e.BytesRecorded, _monitorGainMultiplier);
+        lock (_monitorLock)
+        {
+            _monitorRms = rms;
+        }
+    }
+
+    /// <summary>
+    /// モニタリングを停止し、マイクデバイスを解放する。モニタリング中でなければ何もしない。
+    /// Start() (録音開始時の自動停止) と Dispose() の両方から呼ばれるため、内部で例外を
+    /// 握りつぶすベストエフォート実装にする (ここで例外が漏れると、録音開始やアプリ終了処理
+    /// そのものを失敗させてしまいかねないため)。
+    /// </summary>
+    public void StopMonitoring()
+    {
+        // 登録簿からの除去は早期 return より前、無条件に行う (二重呼び出しでも Remove は
+        // 何も無ければ何もしないだけなので安全)。これにより「モニタリング中でない」と
+        // 自分では思っていても、万一登録簿に残っていた場合の取りこぼしを防ぐ。
+        lock (s_crossInstanceLock) { s_monitoringInstances.Remove(this); }
+
+        if (!IsMonitoring && _monitorWaveIn == null)
+        {
+            return;
+        }
+
+        IsMonitoring = false;
+        var waveIn = _monitorWaveIn;
+        _monitorWaveIn = null;
+
+        if (waveIn != null)
+        {
+            try
+            {
+                waveIn.DataAvailable -= OnMonitorDataAvailable;
+                waveIn.StopRecording();
+            }
+            catch
+            {
+                // ベストエフォート: 停止処理自体の失敗で例外を伝播させない。
+            }
+            finally
+            {
+                try { waveIn.Dispose(); } catch { }
+            }
+        }
+
+        lock (_monitorLock) { _monitorRms = 0.0; }
+    }
+
     public string? Stop()
     {
         if (!IsRecording)
@@ -196,29 +387,44 @@ public class AudioRecorder : IDisposable
         _autoStopTimer.Change(Timeout.Infinite, Timeout.Infinite);
         IsRecording = false;
 
-        if (_waveIn != null)
+        // 後片付けの途中で例外が出ても、登録簿からの除去だけは必ず行う (finally)。
+        // ここを取りこぼすと s_recordingInstances にインスタンスが残り続け、
+        // StartMonitoring の「プロセス内のどこかで録音中か」判定が永久に真になって
+        // マイクレベルのモニタリングが二度と開始できなくなる (しかもエラーは
+        // 「録音中です」としか出ないため、原因にたどり着けない)。
+        try
         {
-            _waveIn.StopRecording();
+            if (_waveIn != null)
+            {
+                _waveIn.StopRecording();
 
-            // StopRecording() は非同期にキャプチャスレッドへ停止を要求するだけで、
-            // 呼び出し時点ではスレッドがまだ動作中のことがある。RecordingStopped が
-            // 発火する（= キャプチャスレッドが完全に終了する）まで待ってから後片付けする
-            // ことで、書き込み中の _writer を破棄してしまう競合を防ぐ。万一イベントが
-            // 発火しない場合に無限待機しないよう、タイムアウト付きでベストエフォートに
-            // 後片付けを進める。
-            _recordingStoppedSignal.Wait(TimeSpan.FromSeconds(5));
+                // StopRecording() は非同期にキャプチャスレッドへ停止を要求するだけで、
+                // 呼び出し時点ではスレッドがまだ動作中のことがある。RecordingStopped が
+                // 発火する（= キャプチャスレッドが完全に終了する）まで待ってから後片付けする
+                // ことで、書き込み中の _writer を破棄してしまう競合を防ぐ。万一イベントが
+                // 発火しない場合に無限待機しないよう、タイムアウト付きでベストエフォートに
+                // 後片付けを進める。
+                _recordingStoppedSignal.Wait(TimeSpan.FromSeconds(5));
 
-            _waveIn.DataAvailable -= OnDataAvailable;
-            _waveIn.RecordingStopped -= OnRecordingStopped;
-            _waveIn.Dispose();
-            _waveIn = null;
+                _waveIn.DataAvailable -= OnDataAvailable;
+                _waveIn.RecordingStopped -= OnRecordingStopped;
+                _waveIn.Dispose();
+                _waveIn = null;
+            }
+
+            if (_writer != null)
+            {
+                _writer.Flush();
+                _writer.Dispose();
+                _writer = null;
+            }
         }
-
-        if (_writer != null)
+        finally
         {
-            _writer.Flush();
-            _writer.Dispose();
-            _writer = null;
+            // デバイスを実際に解放し終えた後に登録簿から外す (StartMonitoring 側の
+            // 「プロセス内のどこかで録音中か」の判定が、デバイスがまだ解放されていない
+            // 途中の状態を「録音していない」と誤認しないようにするため)。
+            lock (s_crossInstanceLock) { s_recordingInstances.Remove(this); }
         }
 
         return _tempFilePath;
@@ -322,6 +528,9 @@ public class AudioRecorder : IDisposable
 
     public void Dispose()
     {
+        // モニタリング (マイクテスト) 用のマイクが開きっぱなしにならないよう、
+        // 録音の後片付け (Cleanup) より前に必ず停止する。
+        StopMonitoring();
         Cleanup();
         _autoStopTimer.Dispose();
         _recordingStoppedSignal.Dispose();
@@ -426,4 +635,28 @@ internal static class AudioSampleProcessor
 
         return (sampleCount, sumSquared, peak);
     }
+
+    /// <summary>
+    /// マイク入力レベルの「モニタリング」(AudioRecorder.OnMonitorDataAvailable) 用に、
+    /// 16bit PCM のバイト列へゲインを適用したうえで RMS (sqrt(mean(square(samples)))) を
+    /// 1回のコールバック分としてまとめて計算する。ApplyGain → Aggregate という、録音時の
+    /// OnDataAvailable と全く同じ2段階の処理を合成しただけの純粋関数であり、NAudio の型にも
+    /// マイクデバイスにも依存しないため単体テストが可能。
+    /// ・sampleCount が 0 (空バッファ) の場合はゼロ除算を避けるため 0.0 を返す。
+    /// </summary>
+    internal static double ComputeRms(byte[] buffer, int bytesRecorded, double gainMultiplier)
+    {
+        byte[] gained = ApplyGain(buffer, bytesRecorded, gainMultiplier);
+        var (sampleCount, sumSquared, _) = Aggregate(gained, bytesRecorded);
+        return sampleCount > 0 ? Math.Sqrt(sumSquared / sampleCount) : 0.0;
+    }
+
+    /// <summary>
+    /// RMS 値をマイクレベルメーター (0〜100 の ProgressBar) 表示用の整数値に変換する。
+    /// 移植元 Python 版 (src/ui/settings.py の _update_mic_bar) と同じ式
+    /// min(100, int(rms * 300)) を使う。300 倍しているのは、通常の発話音量の RMS が
+    /// 概ね 0.0〜0.3 程度に収まることを踏まえた見た目上のスケーリングであり、
+    /// 100 を超えた場合は 100 に丸める (ProgressBar の Maximum を超えないようにするため)。
+    /// </summary>
+    internal static int RmsToBarValue(double rms) => Math.Min(100, (int)(rms * 300));
 }

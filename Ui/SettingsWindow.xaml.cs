@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using VoiceIn.Ai;
 using VoiceIn.Audio;
 using VoiceIn.Core;
@@ -68,6 +69,18 @@ public partial class SettingsWindow : Window
     // キャンセルできるよう、Closed イベントでも参照する。
     private CancellationTokenSource? _modelDownloadCts;
 
+    // マイクテスト (レベルメーター) 専用の AudioRecorder。App.xaml.cs がホットキー録音用に
+    // 保持しているインスタンスとは別物であり (App.xaml.cs は編集禁止のためインスタンスを
+    // 共有できない)、Start()/Stop() による実録音には一切使わず、StartMonitoring/StopMonitoring
+    // のみを呼ぶ。録音とモニタリングの二重オープン回避は AudioRecorder 側の static な
+    // 排他制御 (Audio/AudioRecorder.cs 参照) が担う。
+    private readonly AudioRecorder _micTestRecorder = new();
+
+    // マイクテストのバー表示更新用タイマー。NAudio のキャプチャコールバック (別スレッド) から
+    // 直接 UI を更新しないよう、UI スレッドの DispatcherTimer で _micTestRecorder の
+    // CurrentMonitoringRms を定期的にポーリングする。
+    private DispatcherTimer? _micTestTimer;
+
     public SettingsWindow()
     {
         InitializeComponent();
@@ -76,6 +89,15 @@ public partial class SettingsWindow : Window
         // ウィンドウを閉じた後もバックグラウンドでダウンロードが走り続けないよう、
         // 閉じた時点で確実にキャンセルする。
         Closed += (s, e) => _modelDownloadCts?.Cancel();
+
+        // マイクが開きっぱなしにならないよう、ウィンドウを閉じたら必ずマイクテストを止める。
+        // _micTestRecorder.Dispose() は内部で StopMonitoring() を呼ぶため、トグルボタンで
+        // 止め忘れていた場合でも確実にデバイスが解放される。
+        Closed += (s, e) =>
+        {
+            _micTestTimer?.Stop();
+            _micTestRecorder.Dispose();
+        };
     }
 
     private void LoadSettings()
@@ -767,6 +789,94 @@ public partial class SettingsWindow : Window
     private void OnCancel(object sender, RoutedEventArgs e)
     {
         Close();
+    }
+
+    /// <summary>
+    /// マイクテストのトグルボタン。モニタリング中でなければ開始し、モニタリング中であれば停止する。
+    /// </summary>
+    private void OnToggleMicTest(object sender, RoutedEventArgs e)
+    {
+        if (_micTestRecorder.IsMonitoring)
+        {
+            StopMicTest();
+        }
+        else
+        {
+            StartMicTest();
+        }
+    }
+
+    /// <summary>
+    /// 現在 CmbMicDevice で選択されているデバイスに対してマイクテストを開始する。
+    /// 録音中 (ホットキーによるものを含む) や、デバイスが他アプリで使用中・無効化されている
+    /// 場合は AudioRecorder.StartMonitoring が例外を投げるので、ここで catch して
+    /// 「何が起きたか分かるメッセージ」を表示する (黙って失敗させない)。
+    /// </summary>
+    private void StartMicTest()
+    {
+        int? deviceIndex = CmbMicDevice.SelectedIndex <= 0 ? null : CmbMicDevice.SelectedIndex - 1;
+
+        try
+        {
+            _micTestRecorder.StartMonitoring(deviceIndex);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"マイクテストを開始できませんでした。デバイスが他のアプリで使用中か、無効になっている可能性があります。\n\n{ex.Message}",
+                "Voice In - マイクテスト",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
+
+        PbMicTestLevel.Value = 0;
+        BtnToggleMicTest.Content = "⏹ マイクテスト停止";
+
+        // Tick を二重登録しないよう、既存のタイマーがあれば使い回す (無ければ生成する)。
+        if (_micTestTimer == null)
+        {
+            _micTestTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            _micTestTimer.Tick += OnMicTestTimerTick;
+        }
+        _micTestTimer.Start();
+    }
+
+    /// <summary>
+    /// マイクテストを停止する。トグルボタン・ウィンドウを閉じたとき・デバイス切り替え時の
+    /// いずれからも呼ばれる。モニタリングしていない状態で呼んでも安全 (AudioRecorder.StopMonitoring
+    /// は冪等)。
+    /// </summary>
+    private void StopMicTest()
+    {
+        _micTestTimer?.Stop();
+        _micTestRecorder.StopMonitoring();
+        PbMicTestLevel.Value = 0;
+        BtnToggleMicTest.Content = "▶ マイクテスト開始";
+    }
+
+    /// <summary>
+    /// マイクテストのバー表示を更新するタイマーコールバック。DispatcherTimer の Tick は
+    /// UI スレッド (このウィンドウの Dispatcher) 上で実行されるため、NAudio のキャプチャ
+    /// コールバック (別スレッド) から直接 UI を更新することにはならない。
+    /// バーの値は移植元 Python 版と同じ min(100, (int)(rms * 300)) (AudioSampleProcessor.RmsToBarValue)。
+    /// </summary>
+    private void OnMicTestTimerTick(object? sender, EventArgs e)
+    {
+        double rms = _micTestRecorder.CurrentMonitoringRms;
+        PbMicTestLevel.Value = AudioSampleProcessor.RmsToBarValue(rms);
+    }
+
+    /// <summary>
+    /// マイク入力デバイスの選択が変わったときに呼ばれる。マイクテスト中に古いデバイスを
+    /// 監視し続けないよう、実行中であれば一旦停止する (再開はユーザーがボタンを押し直す)。
+    /// </summary>
+    private void OnMicDeviceSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_micTestRecorder.IsMonitoring)
+        {
+            StopMicTest();
+        }
     }
 
     /// <summary>

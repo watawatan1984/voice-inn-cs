@@ -163,8 +163,26 @@
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
                         <TextBlock Text="マイク入力デバイス:"/>
-                        <ComboBox x:Name="CmbMicDevice" Grid.Column="1"/>
+                        <ComboBox x:Name="CmbMicDevice" Grid.Column="1" SelectionChanged="OnMicDeviceSelectionChanged"/>
                     </Grid>
+
+                    <!-- マイクテスト: 選択したデバイスが実際に音を拾えているかをここで確認できる。
+                         新規ユーザーが最初にデバイスを選ぶ場面のため特に重要。実装方針は
+                         Ui/SettingsWindow.xaml と同じ (DispatcherTimer でバーを更新、ファイルへは
+                         一切書き込まない)。詳細は SetupWindow.xaml.cs 参照。 -->
+                    <Grid Margin="0,0,0,2">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="140"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="マイクテスト:"/>
+                        <ProgressBar x:Name="PbMicTestLevel" Grid.Column="1" Height="18" Minimum="0" Maximum="100"
+                                     Foreground="#A6E3A1" Background="#313244" BorderBrush="#45475A" BorderThickness="1" Margin="0,0,8,0"/>
+                        <Button x:Name="BtnToggleMicTest" Grid.Column="2" Content="▶ マイクテスト開始" Width="160" Click="OnToggleMicTest"/>
+                    </Grid>
+                    <TextBlock Text="開始すると、選択中のデバイスに向かって話したときにバーが動きます (ファイルへの保存や送信は一切行いません)。"
+                               TextWrapping="Wrap" FontSize="11" Foreground="#A6ADC8" Margin="140,0,0,10"/>
                 </StackPanel>
 
                 <!-- ページ4: 操作キー -->
