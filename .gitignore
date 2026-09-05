@@ -17,3 +17,6 @@ history.json
 settings.json
 temp_*.wav
 *.tmp
+
+## Installer build output (dotnet publish + Inno Setup, see installer/build.ps1)
+dist/
