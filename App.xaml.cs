@@ -396,14 +396,39 @@ public partial class App : System.Windows.Application
 
                 SetAppState("success");
 
-                // 自動貼り付け
-                if (!string.IsNullOrWhiteSpace(text) && audioSettings.AutoPaste)
+                // クリップボードへの格納・自動貼り付け
+                //
+                // 【設計方針】参照アプリ (Aqua Voice / Typeless) と同様、AutoPaste の有効/無効に
+                // 関わらず文字起こし結果は必ずクリップボードへ格納する。AutoPaste が無効な場合は
+                // 「貼り付け」だけを行わず、クリップボードへの格納 (TextPaster.CopyToClipboardAsync)
+                // のみ行う。これにより、AutoPaste を無効にしているユーザーでも
+                // 手動 Ctrl+V で文字起こし結果を貼り付けられる
+                // (以前は AutoPaste が false の場合、クリップボードにも一切格納していなかった)。
+                if (!string.IsNullOrWhiteSpace(text))
                 {
-                    IntPtr hwnd = _targetWindow?.Hwnd ?? IntPtr.Zero;
-                    bool pasted = await TextPaster.PasteTextAsync(text, hwnd, audioSettings.PasteDelayMs);
-                    if (!pasted)
+                    if (audioSettings.AutoPaste)
                     {
-                        _notifyIcon?.ShowBalloonTip(2000, "Voice In", "自動貼り付けに失敗しました。変換結果は履歴から確認できます。", Forms.ToolTipIcon.Warning);
+                        IntPtr hwnd = _targetWindow?.Hwnd ?? IntPtr.Zero;
+                        PasteResult result = await TextPaster.PasteTextAsync(text, hwnd, audioSettings.PasteDelayMs);
+                        if (!result.Pasted)
+                        {
+                            // クリップボードへの格納そのものが失敗した場合のみ「履歴から確認できます」
+                            // という後退案内を出す。格納自体は成功している (ClipboardSet == true) が
+                            // 自動貼り付けだけ失敗した場合は、Ctrl+V で貼り付けられることを案内する
+                            // (履歴を見に行かせるのは不親切なため)。
+                            string message = result.ClipboardSet
+                                ? "自動貼り付けに失敗しました。Ctrl+V で貼り付けできます。"
+                                : "クリップボードへのコピーに失敗しました。変換結果は履歴から確認できます。";
+                            _notifyIcon?.ShowBalloonTip(2000, "Voice In", message, Forms.ToolTipIcon.Warning);
+                        }
+                    }
+                    else
+                    {
+                        bool clipboardSet = await TextPaster.CopyToClipboardAsync(text);
+                        if (!clipboardSet)
+                        {
+                            _notifyIcon?.ShowBalloonTip(2000, "Voice In", "クリップボードへのコピーに失敗しました。変換結果は履歴から確認できます。", Forms.ToolTipIcon.Warning);
+                        }
                     }
                 }
 
