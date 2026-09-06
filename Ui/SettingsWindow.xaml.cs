@@ -287,12 +287,14 @@ public partial class SettingsWindow : Window
         if (File.Exists(effectivePath))
         {
             LblLocalModelStatus.Text = $"モデルは見つかりました。\n{effectivePath}";
-            LblLocalModelStatus.Foreground = new System.Windows.Media.SolidColorBrush(Color.FromRgb(0xA6, 0xE3, 0xA1));
+            // 成功・有効状態の色 (#5A9E6F、設定画面の配色に合わせたもの)。
+            LblLocalModelStatus.Foreground = new System.Windows.Media.SolidColorBrush(Color.FromRgb(0x5A, 0x9E, 0x6F));
         }
         else
         {
             LblLocalModelStatus.Text = $"モデルが見つかりません。ダウンロードが必要です。\n(想定パス: {effectivePath})";
-            LblLocalModelStatus.Foreground = new System.Windows.Media.SolidColorBrush(Color.FromRgb(0xF3, 0x8B, 0xA8));
+            // 警告・破壊的操作の色 (#C85A5A、設定画面の配色に合わせたもの)。
+            LblLocalModelStatus.Foreground = new System.Windows.Media.SolidColorBrush(Color.FromRgb(0xC8, 0x5A, 0x5A));
         }
     }
 
@@ -468,6 +470,166 @@ public partial class SettingsWindow : Window
         {
             _categoryKeywordEntries.Remove(selected);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 「既定に戻す」機能 (プロンプト・辞書)。
+    //
+    // 背景: settings.json に一度でも保存された値は AppSettings のプロパティ既定値より優先され、
+    // 以後ずっと使われ続ける。そのため、アプリ更新でプロンプトの不具合を直しても、既に設定を
+    // 保存したことがあるユーザーには自動的には届かない (Core/Settings.cs の PromptSettings
+    // 冒頭コメント参照)。ここではその復旧手段として、画面上の値だけを既定値に戻すボタンを
+    // 用意する。実際に settings.json へ反映されるのは、他の編集と同じく「保存して適用」
+    // (OnSaveAndApply) を押したときのみであり、このボタン単体で SettingsManager.Instance.Save()
+    // が呼ばれることはない (誤って押しても「キャンセル」で復帰できる)。
+    //
+    // 各 Get/TryGet ヘルパーは PromptSettings/AppSettings の「新規インスタンスのプロパティ既定値」
+    // を読むだけの純粋な処理であり、SettingsManager.Instance (%AppData%\VoiceIn の実ファイル) には
+    // 一切触れない。ApplyDetectedAppCategoryAssignment と同じく internal static であり、
+    // WPF ホスト無しの単体テストから直接呼び出して検証できる。
+    // ------------------------------------------------------------------
+
+    internal static string GetDefaultGeminiTranscribePrompt() => new PromptSettings().GeminiTranscribePrompt;
+
+    internal static string GetDefaultGroqWhisperPrompt() => new PromptSettings().GroqWhisperPrompt;
+
+    internal static string GetDefaultGroqRefineSystemPrompt() => new PromptSettings().GroqRefineSystemPrompt;
+
+    /// <summary>
+    /// 指定したカテゴリキー (DEV/BIZ/DOC/STD 等) に対応する既定のカテゴリ別プロンプトを返す。
+    /// settings.json の手動編集などで追加された、既定値を持たないカスタムカテゴリの場合は
+    /// false を返す (呼び出し側は画面の内容を変更せず、既定値が無い旨を伝えること)。
+    /// </summary>
+    internal static bool TryGetDefaultCategoryPrompt(string categoryKey, out string defaultPrompt)
+    {
+        if (new AppSettings().CategoryPrompts.TryGetValue(categoryKey, out var value))
+        {
+            defaultPrompt = value;
+            return true;
+        }
+
+        defaultPrompt = string.Empty;
+        return false;
+    }
+
+    /// <summary>
+    /// 「文字起こし用プロンプト」(Gemini プロンプト・Groq Whisper プロンプト) を既定値に戻す。
+    /// 押した時点では画面上の TextBox の内容を書き換えるだけで、settings.json への反映は
+    /// 通常どおり「保存して適用」を押したときのみ行われる。取り消せない操作 (現在の入力内容は
+    /// 失われる) のため、既存の履歴全削除 (OnClearDetectedApps) と同じ方針で確認ダイアログを出し、
+    /// 既定ボタンを「いいえ」にする。
+    /// </summary>
+    private void OnResetTranscribePromptsToDefault(object sender, RoutedEventArgs e)
+    {
+        var result = MessageBox.Show(
+            "文字起こし用プロンプト (Gemini プロンプト・Groq Whisper プロンプト) を既定値に戻します。\n" +
+            "現在入力されている内容は失われ、元に戻せません。(この画面を「保存して適用」するまでは設定ファイルへ反映されません)\n\n" +
+            "よろしいですか?",
+            "Voice In",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (result != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        TxtGeminiPrompt.Text = GetDefaultGeminiTranscribePrompt();
+        TxtGroqWhisperPrompt.Text = GetDefaultGroqWhisperPrompt();
+    }
+
+    /// <summary>
+    /// 「整形用プロンプト」(Groq 文章整形プロンプト) を既定値に戻す。方針は
+    /// OnResetTranscribePromptsToDefault と同じ (画面上のみ即時反映、確認ダイアログの既定は「いいえ」)。
+    /// </summary>
+    private void OnResetRefinePromptToDefault(object sender, RoutedEventArgs e)
+    {
+        var result = MessageBox.Show(
+            "整形用プロンプト (Groq 文章整形プロンプト) を既定値に戻します。\n" +
+            "現在入力されている内容は失われ、元に戻せません。(この画面を「保存して適用」するまでは設定ファイルへ反映されません)\n\n" +
+            "よろしいですか?",
+            "Voice In",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (result != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        TxtGroqRefinePrompt.Text = GetDefaultGroqRefineSystemPrompt();
+    }
+
+    /// <summary>
+    /// 現在 CmbCategory で選択中のカテゴリの「カテゴリ別プロンプト」を既定値に戻す。
+    /// DEV/BIZ/DOC/STD など既定値を持つカテゴリのみが対象で、既定値の無いカスタムカテゴリが
+    /// 選択されている場合は画面の内容を変更せず、その旨を伝えるメッセージだけを表示する。
+    /// </summary>
+    private void OnResetCategoryPromptToDefault(object sender, RoutedEventArgs e)
+    {
+        if (_currentCategoryKey is not string categoryKey)
+        {
+            MessageBox.Show("カテゴリを選択してください。", "Voice In", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        if (!TryGetDefaultCategoryPrompt(categoryKey, out string defaultPrompt))
+        {
+            MessageBox.Show(
+                $"「{categoryKey}」には既定のプロンプトが用意されていません。",
+                "Voice In",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        var result = MessageBox.Show(
+            $"「{categoryKey}」のカテゴリ別プロンプトを既定値に戻します。\n" +
+            "現在入力されている内容は失われ、元に戻せません。(この画面を「保存して適用」するまでは設定ファイルへ反映されません)\n\n" +
+            "よろしいですか?",
+            "Voice In",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (result != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        TxtCategoryPrompt.Text = defaultPrompt;
+    }
+
+    /// <summary>
+    /// 辞書 (単語置換ルール) を既定の空の状態に戻す (画面上の一覧をすべて削除する。
+    /// AppSettings.Dictionary の既定値が空の Dictionary であることに対応する)。
+    /// 画面上の _dictEntries を空にするだけであり、settings.json への反映は「保存して適用」
+    /// (OnSaveAndApply) を押したときのみ行われる。
+    /// </summary>
+    private void OnResetDictionaryToDefault(object sender, RoutedEventArgs e)
+    {
+        if (_dictEntries.Count == 0)
+        {
+            return;
+        }
+
+        var result = MessageBox.Show(
+            "辞書 (単語置換ルール) をすべて削除し、既定の状態に戻します。\n" +
+            "現在の内容は失われ、元に戻せません。(この画面を「保存して適用」するまでは設定ファイルへ反映されません)\n\n" +
+            "よろしいですか?",
+            "Voice In",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (result != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        _dictEntries.Clear();
     }
 
     /// <summary>
@@ -831,7 +993,7 @@ public partial class SettingsWindow : Window
         }
 
         PbMicTestLevel.Value = 0;
-        BtnToggleMicTest.Content = "⏹ マイクテスト停止";
+        BtnToggleMicTest.Content = "マイクテスト停止";
 
         // Tick を二重登録しないよう、既存のタイマーがあれば使い回す (無ければ生成する)。
         if (_micTestTimer == null)
@@ -852,7 +1014,7 @@ public partial class SettingsWindow : Window
         _micTestTimer?.Stop();
         _micTestRecorder.StopMonitoring();
         PbMicTestLevel.Value = 0;
-        BtnToggleMicTest.Content = "▶ マイクテスト開始";
+        BtnToggleMicTest.Content = "マイクテスト開始";
     }
 
     /// <summary>
