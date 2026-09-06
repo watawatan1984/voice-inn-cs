@@ -558,13 +558,17 @@ public partial class SettingsWindow : Window
     }
 
     /// <summary>
-    /// 「整形用プロンプト」(Groq 文章整形プロンプト) を既定値に戻す。方針は
-    /// OnResetTranscribePromptsToDefault と同じ (画面上のみ即時反映、確認ダイアログの既定は「いいえ」)。
+    /// 「整形用プロンプト」を既定値に戻す。方針は OnResetTranscribePromptsToDefault と同じ
+    /// (画面上のみ即時反映、確認ダイアログの既定は「いいえ」)。
+    /// 【欠陥6】かつては「Groq 文章整形プロンプト」と呼んでいたが、整形は Groq から切り離され
+    /// Gemini / NVIDIA が担当するため、表示文言・メッセージともに「整形」という中立的な
+    /// 名称のみを使う (x:Name=TxtGroqRefinePrompt とプロパティ名 GroqRefineSystemPrompt は
+    /// 後方互換のため変更しない)。
     /// </summary>
     private void OnResetRefinePromptToDefault(object sender, RoutedEventArgs e)
     {
         var result = MessageBox.Show(
-            "整形用プロンプト (Groq 文章整形プロンプト) を既定値に戻します。\n" +
+            "整形用プロンプトを既定値に戻します。\n" +
             "現在入力されている内容は失われ、元に戻せません。(この画面を「保存して適用」するまでは設定ファイルへ反映されません)\n\n" +
             "よろしいですか?",
             "Voice In",
@@ -1163,7 +1167,7 @@ public partial class SettingsWindow : Window
         string? existing = Environment.GetEnvironmentVariable(envKey);
         status.Text = string.IsNullOrEmpty(existing)
             ? "未設定"
-            : "設定済み (空欄のまま保存すると変更されません。変更する場合のみ入力してください)";
+            : "設定済み (空欄のまま保存すれば変更されません)";
     }
 
     /// <summary>

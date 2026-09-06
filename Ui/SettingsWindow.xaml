@@ -104,41 +104,150 @@
             </Style.Triggers>
         </Style>
 
-        <!-- ComboBox は閉じた状態とドロップダウンの両方を暗色系で揃える。
-             Background に暗い面色を敷きながら Foreground を暗色 (#11111B) のままにすると、
-             閉じた状態が「暗背景に暗文字」となりコントラスト比 1.1:1 程度で事実上読めなくなる。
-             ポップアップ側は下の ComboBoxItem スタイルで明示的に暗色 + 薄い文字に揃えるため、
-             ここは他のコントロールと同じ TextPrimaryBrush を使う。 -->
+        <!-- ComboBox は WPF 既定の ControlTemplate を使う限り Background 等の Setter が効かない
+             (既定テンプレートは Windows テーマの chrome を独自に描画し、Background を無視する)。
+             そのため ControlTemplate を丸ごと自作し、他のコントロールと同じ SurfaceBrush (背景) /
+             DividerBrush (罫線) / TextPrimaryBrush (文字) で描画する。これにより「白い箱のまま
+             浮いて見える」問題と「暗い chrome に薄文字で読めない」問題の両方を、テンプレート内で
+             背景と前景を必ず一致させることで解消する。
+
+             必須パーツ (名前を変えたり欠かすと ComboBox が正しく動かない、または実行時例外になる):
+               - PART_EditableTextBox (TextBox): IsEditable="True" のときの編集可能な入力欄。
+                 ComboBox 本体がこの名前でテンプレートから探し出し、入力文字列と ComboBox.Text の
+                 同期・キー入力処理を自動で行う。
+               - PART_Popup (Popup): ドロップダウン本体。ComboBox がこの名前で探し出し、
+                 (外側クリック等で) Popup 自身が閉じたときに ComboBox.IsDropDownOpen を追従させる。
+               - ToggleButton (名前は任意、下では "ToggleButton" とした): IsChecked を
+                 IsDropDownOpen へ双方向バインドすることで開閉のトリガーにする。
+
+             IsEditable の有無は ControlTemplate.Triggers で ContentPresenter (非編集時: 選択項目を
+             表示) と PART_EditableTextBox (編集時: 自由入力) の Visibility を切り替えて両立させる。
+             ToggleButton はコントロール全面を覆うが Background は透明で、右端にだけ矢印を描く。
+             ContentPresenter は IsHitTestVisible="False" のため非編集時はクリックが素通りして
+             ToggleButton に届き (=どこをクリックしても開く)、編集時は PART_EditableTextBox が
+             ToggleButton の手前 (後勝ち) に重なるため、テキスト部分のクリックは編集用キャレット
+             移動として扱われ、右端の矢印部分のクリックだけが開閉に使われる。
+
+             旧実装ではここに Style.Resources で内部 TextBox (PART_EditableTextBox) を透明・
+             枠無しにする回避策があったが、既定テンプレートを使わなくなった以上その回避策は
+             意味を持たない (このテンプレートが PART_EditableTextBox に直接 Background="Transparent"
+             等をローカル値として設定しており、ローカル値は暗黙スタイルより優先されるため、
+             Window.Resources の無名 TextBox スタイルはそもそも上書きされる)。害はなくとも
+             読み手を混乱させる死んだコードになるため削除した。 -->
         <Style TargetType="ComboBox">
             <Setter Property="Background" Value="{StaticResource SurfaceBrush}"/>
             <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}"/>
             <Setter Property="BorderBrush" Value="{StaticResource DividerBrush}"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Padding" Value="8,6"/>
+            <Setter Property="Padding" Value="8,6,28,6"/>
             <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
-            <Style.Resources>
-                <!-- IsEditable="True" の ComboBox は、テンプレート内部に PART_EditableTextBox
-                     という TextBox を持つ。この Window.Resources にある TextBox の暗黙スタイルは
-                     テンプレート内部にも適用されるため、そのままだと内側の TextBox にも
-                     罫線 1px と余白 8,6 が付き、ComboBox 自身の枠と合わせて二重枠・二重余白に
-                     見えてしまう。内部の編集領域だけは枠と塗りを持たせず、外側の ComboBox の
-                     見た目に委ねる。 -->
-                <Style TargetType="TextBox">
-                    <Setter Property="Background" Value="Transparent"/>
-                    <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}"/>
-                    <Setter Property="BorderThickness" Value="0"/>
-                    <Setter Property="Padding" Value="0"/>
-                    <Setter Property="CaretBrush" Value="{StaticResource TextPrimaryBrush}"/>
-                    <Setter Property="SelectionBrush" Value="{StaticResource SurfaceRaisedBrush}"/>
-                    <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
-                    <Setter Property="VerticalContentAlignment" Value="Center"/>
-                </Style>
-            </Style.Resources>
-            <Style.Triggers>
-                <Trigger Property="IsKeyboardFocusWithin" Value="True">
-                    <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
-                </Trigger>
-            </Style.Triggers>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid SnapsToDevicePixels="True">
+                            <Border x:Name="Chrome"
+                                    Background="{TemplateBinding Background}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="4"/>
+
+                            <!-- 開閉トグル。コントロール全面を覆う透明ボタンとして最初に置き、
+                                 後から重ねる ContentPresenter / PART_EditableTextBox より背面にする
+                                 (XAML内での宣言順 = Z順、後勝ち)。右端にだけ矢印を描く。 -->
+                            <ToggleButton x:Name="ToggleButton"
+                                          Background="Transparent"
+                                          Focusable="False"
+                                          ClickMode="Press"
+                                          IsChecked="{Binding Path=IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border Background="{TemplateBinding Background}">
+                                            <Path HorizontalAlignment="Right"
+                                                  VerticalAlignment="Center"
+                                                  Margin="0,0,11,0"
+                                                  Fill="{StaticResource TextSecondaryBrush}"
+                                                  Data="M0,0 L9,0 L4.5,5 Z"/>
+                                        </Border>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                            </ToggleButton>
+
+                            <!-- 非編集時: 選択中の項目を表示する。IsHitTestVisible="False" により
+                                 クリックは背面の ToggleButton へ素通しする (どこを押しても開く)。
+                                 IsEditable="True" のときは下のトリガーで Collapsed にする。 -->
+                            <ContentPresenter x:Name="ContentSite"
+                                              Margin="{TemplateBinding Padding}"
+                                              HorizontalAlignment="Left"
+                                              VerticalAlignment="Center"
+                                              IsHitTestVisible="False"
+                                              Content="{TemplateBinding SelectionBoxItem}"
+                                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                              ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"/>
+
+                            <!-- 編集時のみ使う入力欄 (既定は Collapsed)。ToggleButton より後に
+                                 宣言することで手前に重なり、テキスト部分のクリックは編集用に
+                                 消費され、右端の矢印部分 (このテキストボックスの右マージン分だけ
+                                 露出している) のクリックだけが背面の ToggleButton に渡る。 -->
+                            <TextBox x:Name="PART_EditableTextBox"
+                                     Margin="{TemplateBinding Padding}"
+                                     HorizontalAlignment="Stretch"
+                                     VerticalAlignment="Center"
+                                     VerticalContentAlignment="Center"
+                                     Background="Transparent"
+                                     Foreground="{TemplateBinding Foreground}"
+                                     CaretBrush="{TemplateBinding Foreground}"
+                                     SelectionBrush="{StaticResource SurfaceRaisedBrush}"
+                                     BorderThickness="0"
+                                     Padding="0"
+                                     FocusVisualStyle="{x:Null}"
+                                     Focusable="True"
+                                     Visibility="Collapsed"
+                                     IsReadOnly="{TemplateBinding IsReadOnly}"/>
+
+                            <!-- ドロップダウン本体。名前 "PART_Popup" は ComboBox が自動で探す
+                                 必須パーツ (Popup が自ら閉じたときに IsDropDownOpen を追従させる)。 -->
+                            <Popup x:Name="PART_Popup"
+                                   AllowsTransparency="True"
+                                   Focusable="False"
+                                   StaysOpen="False"
+                                   Placement="Bottom"
+                                   IsOpen="{TemplateBinding IsDropDownOpen}"
+                                   PopupAnimation="Slide">
+                                <Border MinWidth="{TemplateBinding ActualWidth}"
+                                        MaxHeight="{TemplateBinding MaxDropDownHeight}"
+                                        Background="{StaticResource SurfaceBrush}"
+                                        BorderBrush="{StaticResource DividerBrush}"
+                                        BorderThickness="1"
+                                        SnapsToDevicePixels="True">
+                                    <ScrollViewer SnapsToDevicePixels="True"
+                                                  VerticalScrollBarVisibility="Auto">
+                                        <ItemsPresenter/>
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsEditable" Value="True">
+                                <Setter Property="IsTabStop" Value="False"/>
+                                <Setter TargetName="ContentSite" Property="Visibility" Value="Collapsed"/>
+                                <Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Chrome" Property="Background" Value="{StaticResource SurfaceRaisedBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                <Setter TargetName="Chrome" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsDropDownOpen" Value="True">
+                                <Setter TargetName="Chrome" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Chrome" Property="Opacity" Value="0.5"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
 
         <!-- ドロップダウン内の各項目。既定テーマのままだと明るい面に描画され、
@@ -294,6 +403,88 @@
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
         </Style>
+
+        <!-- ScrollBar。既定テンプレートのままだと Windows テーマの明るい chrome
+             (白に近い溝と矢印ボタン) がそのまま描かれ、暗色の画面に白い帯が縦に走って
+             最も目立つ粗になる。ScrollViewer は本文の TextBox 内部にも現れるため、
+             ここで一括して暗色に揃える。
+             矢印ボタンは省き、溝と摘まみだけの細い形にする (情報量を増やさないため)。 -->
+        <Style TargetType="Thumb" x:Key="ScrollThumbStyle">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="IsTabStop" Value="False"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Thumb">
+                        <Border x:Name="ThumbBg"
+                                Background="#3A3B40"
+                                CornerRadius="3"
+                                Margin="3"/>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ThumbBg" Property="Background" Value="#4C4D53"/>
+                            </Trigger>
+                            <Trigger Property="IsDragging" Value="True">
+                                <Setter TargetName="ThumbBg" Property="Background" Value="#5A5B62"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="ScrollBar">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Width" Value="12"/>
+            <Setter Property="MinWidth" Value="12"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Border Background="{TemplateBinding Background}">
+                            <Track x:Name="PART_Track" IsDirectionReversed="True">
+                                <Track.Thumb>
+                                    <Thumb Style="{StaticResource ScrollThumbStyle}"/>
+                                </Track.Thumb>
+                                <!-- 矢印ボタンは置かない。溝のクリックによるページ送りだけ残す。 -->
+                                <Track.DecreaseRepeatButton>
+                                    <RepeatButton Command="ScrollBar.PageUpCommand" Opacity="0" Focusable="False" IsTabStop="False"/>
+                                </Track.DecreaseRepeatButton>
+                                <Track.IncreaseRepeatButton>
+                                    <RepeatButton Command="ScrollBar.PageDownCommand" Opacity="0" Focusable="False" IsTabStop="False"/>
+                                </Track.IncreaseRepeatButton>
+                            </Track>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="Orientation" Value="Horizontal">
+                    <Setter Property="Width" Value="Auto"/>
+                    <Setter Property="MinWidth" Value="0"/>
+                    <Setter Property="Height" Value="12"/>
+                    <Setter Property="MinHeight" Value="12"/>
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="ScrollBar">
+                                <Border Background="{TemplateBinding Background}">
+                                    <Track x:Name="PART_Track" IsDirectionReversed="False">
+                                        <Track.Thumb>
+                                            <Thumb Style="{StaticResource ScrollThumbStyle}"/>
+                                        </Track.Thumb>
+                                        <Track.DecreaseRepeatButton>
+                                            <RepeatButton Command="ScrollBar.PageLeftCommand" Opacity="0" Focusable="False" IsTabStop="False"/>
+                                        </Track.DecreaseRepeatButton>
+                                        <Track.IncreaseRepeatButton>
+                                            <RepeatButton Command="ScrollBar.PageRightCommand" Opacity="0" Focusable="False" IsTabStop="False"/>
+                                        </Track.IncreaseRepeatButton>
+                                    </Track>
+                                </Border>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
     </Window.Resources>
 
     <Grid Background="{StaticResource WindowBgBrush}">
@@ -311,7 +502,10 @@
                          Background="Transparent"
                          ItemContainerStyle="{StaticResource NavItemStyle}"
                          SelectedIndex="{Binding SelectedIndex, ElementName=SectionsTabControl, Mode=TwoWay}">
-                    <ListBoxItem Content="一般"/>
+                    <ListBoxItem Content="文字起こし"/>
+                    <ListBoxItem Content="整形"/>
+                    <ListBoxItem Content="マイク"/>
+                    <ListBoxItem Content="録音"/>
                     <ListBoxItem Content="ローカル"/>
                     <ListBoxItem Content="プロンプト"/>
                     <ListBoxItem Content="辞書"/>
@@ -338,180 +532,204 @@
                     </Style>
                 </TabControl.Resources>
 
-                <!-- 一般設定 -->
-                <TabItem Header="一般">
+                <!-- 文字起こし設定 (旧「一般」タブから分離。1画面に詰め込みすぎて開いた直後から
+                     縦スクロールが必要になっていたため、処理段階ごとにタブを分けた:
+                     文字起こし / 整形 / マイク / 録音 の4画面。ナビ項目が増えることより
+                     スクロール必須の画面が残ることの方が問題、という方針による。) -->
+                <TabItem Header="文字起こし">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel MaxWidth="640" HorizontalAlignment="Left" Margin="32">
+                            <TextBlock Text="文字起こし" Style="{StaticResource GroupHeadingStyle}" Margin="0,0,0,16"/>
+                            <TextBlock Style="{StaticResource HelperTextStyle}" Margin="0,0,0,12"
+                                       Text="音声をテキスト化する設定です。プロバイダにより「整形」タブの設定が使われるかが変わります。"/>
+
+                            <StackPanel Margin="0,0,0,20">
+                                <TextBlock Text="プロバイダ" Style="{StaticResource FieldLabelStyle}"/>
+                                <ComboBox x:Name="CmbProvider" Width="440" HorizontalAlignment="Left">
+                                    <ComboBoxItem Content="gemini"/>
+                                    <ComboBoxItem Content="groq"/>
+                                    <ComboBoxItem Content="local"/>
+                                </ComboBox>
+                            </StackPanel>
+
+                            <!-- Gemini API キー: PasswordBox (マスク表示) と TextBox (平文表示) を重ねて、
+                                 ボタンで Visibility を切り替える。既存キーがあっても実際の値は表示せず、
+                                 下のステータス表示のみで「設定済み」を示す。 -->
+                            <StackPanel Margin="0,0,0,20">
+                                <TextBlock Text="Gemini API キー" Style="{StaticResource FieldLabelStyle}"/>
+                                <!-- 入力欄の幅は他の単一行入力 (440) と揃える。
+                                     Width="*" のままだと親の幅に依存し、タブごとに右端が
+                                     ずれて「揃っていない」印象になるため固定する。 -->
+                                <Grid Width="440" HorizontalAlignment="Left">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid Grid.Column="0" Margin="0,0,8,0">
+                                        <PasswordBox x:Name="PwdGeminiApiKey"/>
+                                        <TextBox x:Name="TxtGeminiApiKeyVisible" Visibility="Collapsed"/>
+                                    </Grid>
+                                    <Button x:Name="BtnToggleGeminiApiKey" Grid.Column="1" Content="表示"
+                                            Click="OnToggleGeminiApiKeyVisibility" ToolTip="表示/非表示を切り替え"/>
+                                </Grid>
+                                <TextBlock x:Name="LblGeminiApiKeyStatus" Style="{StaticResource HelperTextStyle}"/>
+                            </StackPanel>
+
+                            <!-- Groq API キー: Gemini API キーと同じ構成。 -->
+                            <StackPanel Margin="0,0,0,20">
+                                <TextBlock Text="Groq API キー" Style="{StaticResource FieldLabelStyle}"/>
+                                <!-- 入力欄の幅は他の単一行入力 (440) と揃える。
+                                     Width="*" のままだと親の幅に依存し、タブごとに右端が
+                                     ずれて「揃っていない」印象になるため固定する。 -->
+                                <Grid Width="440" HorizontalAlignment="Left">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid Grid.Column="0" Margin="0,0,8,0">
+                                        <PasswordBox x:Name="PwdGroqApiKey"/>
+                                        <TextBox x:Name="TxtGroqApiKeyVisible" Visibility="Collapsed"/>
+                                    </Grid>
+                                    <Button x:Name="BtnToggleGroqApiKey" Grid.Column="1" Content="表示"
+                                            Click="OnToggleGroqApiKeyVisibility" ToolTip="表示/非表示を切り替え"/>
+                                </Grid>
+                                <TextBlock x:Name="LblGroqApiKeyStatus" Style="{StaticResource HelperTextStyle}"/>
+                            </StackPanel>
+
+                            <StackPanel Margin="0,0,0,20">
+                                <TextBlock Text="Gemini モデル (文字起こし用)" Style="{StaticResource FieldLabelStyle}"/>
+                                <TextBox x:Name="TxtGeminiModel" Width="440" HorizontalAlignment="Left"/>
+                                <TextBlock Style="{StaticResource HelperTextStyle}"
+                                           Text="文字起こし用の Gemini モデルです (整形用とは別設定)。"/>
+                            </StackPanel>
+
+                            <StackPanel>
+                                <TextBlock Text="Groq Whisper モデル" Style="{StaticResource FieldLabelStyle}"/>
+                                <ComboBox x:Name="CmbGroqWhisperModel" Width="440" HorizontalAlignment="Left" IsEditable="True">
+                                    <ComboBoxItem Content="whisper-large-v3"/>
+                                </ComboBox>
+                                <TextBlock Style="{StaticResource HelperTextStyle}"
+                                           Text="Groq Whisper のモデル名です。空欄なら既定値 (whisper-large-v3) を使用します。"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+
+                <!-- 整形設定 (旧「一般」タブから分離)。文字起こし後のテキストをさらに整えるバックエンドの設定。
+                     文字起こしに Gemini を選んでいる場合はこの段自体が実行されないため、
+                     その旨を警告色のヘルパーテキストで明示する。 -->
+                <TabItem Header="整形">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel MaxWidth="640" HorizontalAlignment="Left" Margin="32">
+                            <TextBlock Text="整形" Style="{StaticResource GroupHeadingStyle}" Margin="0,0,0,20"/>
+                            <TextBlock Style="{StaticResource WarningHelperTextStyle}" Margin="0,0,0,20"
+                                       Text="文字起こしが Gemini のときは使われません。Groq のとき、またはローカルの「クラウドで整形」有効時のみ使われます。"/>
+
+                            <StackPanel Margin="0,0,0,20">
+                                <TextBlock Text="整形バックエンド" Style="{StaticResource FieldLabelStyle}"/>
+                                <ComboBox x:Name="CmbRefineProvider" Width="440" HorizontalAlignment="Left">
+                                    <ComboBoxItem Content="gemini"/>
+                                    <ComboBoxItem Content="nvidia"/>
+                                </ComboBox>
+                                <TextBlock Style="{StaticResource HelperTextStyle}"
+                                           Text="gemini は文字起こしと同じ API キーを使います。nvidia の場合のみ下の NVIDIA キーが必要です。"/>
+                            </StackPanel>
+
+                            <!-- NVIDIA API キー: Gemini/Groq API キーと同じ構成。 -->
+                            <StackPanel Margin="0,0,0,20">
+                                <TextBlock Text="NVIDIA API キー" Style="{StaticResource FieldLabelStyle}"/>
+                                <!-- 入力欄の幅は他の単一行入力 (440) と揃える。
+                                     Width="*" のままだと親の幅に依存し、タブごとに右端が
+                                     ずれて「揃っていない」印象になるため固定する。 -->
+                                <Grid Width="440" HorizontalAlignment="Left">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid Grid.Column="0" Margin="0,0,8,0">
+                                        <PasswordBox x:Name="PwdNvidiaApiKey"/>
+                                        <TextBox x:Name="TxtNvidiaApiKeyVisible" Visibility="Collapsed"/>
+                                    </Grid>
+                                    <Button x:Name="BtnToggleNvidiaApiKey" Grid.Column="1" Content="表示"
+                                            Click="OnToggleNvidiaApiKeyVisibility" ToolTip="表示/非表示を切り替え"/>
+                                </Grid>
+                                <TextBlock x:Name="LblNvidiaApiKeyStatus" Style="{StaticResource HelperTextStyle}"/>
+                            </StackPanel>
+
+                            <StackPanel Margin="0,0,0,20">
+                                <TextBlock Text="Gemini モデル (整形用)" Style="{StaticResource FieldLabelStyle}"/>
+                                <ComboBox x:Name="CmbGeminiRefineModel" Width="440" HorizontalAlignment="Left" IsEditable="True">
+                                    <ComboBoxItem Content="gemini-flash-lite-latest"/>
+                                </ComboBox>
+                                <TextBlock Style="{StaticResource HelperTextStyle}"
+                                           Text="整形用の Gemini モデルです (文字起こし用とは別)。空欄なら既定値を使用します。"/>
+                            </StackPanel>
+
+                            <StackPanel>
+                                <TextBlock Text="NVIDIA モデル (整形用)" Style="{StaticResource FieldLabelStyle}"/>
+                                <ComboBox x:Name="CmbNvidiaRefineModel" Width="440" HorizontalAlignment="Left" IsEditable="True">
+                                    <ComboBoxItem Content="nvidia/nemotron-3.5-lightning-30b-a3b"/>
+                                </ComboBox>
+                                <TextBlock Style="{StaticResource HelperTextStyle}"
+                                           Text="整形用の NVIDIA モデルです。空欄なら既定値を使用します。"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+
+                <!-- マイク設定 (旧「一般」タブから分離) -->
+                <TabItem Header="マイク">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel MaxWidth="640" HorizontalAlignment="Left" Margin="32">
+                            <TextBlock Text="マイク" Style="{StaticResource GroupHeadingStyle}" Margin="0,0,0,20"/>
+
+                            <StackPanel Margin="0,0,0,20">
+                                <TextBlock Text="入力デバイス" Style="{StaticResource FieldLabelStyle}"/>
+                                <ComboBox x:Name="CmbMicDevice" Width="440" HorizontalAlignment="Left" SelectionChanged="OnMicDeviceSelectionChanged"/>
+                            </StackPanel>
+
+                            <!-- マイクテスト: 選択中のデバイスが実際に音を拾えているかをその場で確認するための
+                                 レベルメーター。NAudio のキャプチャコールバックからは直接 UI を更新せず、
+                                 DispatcherTimer (OnMicTestTimerTick) が AudioRecorder.CurrentMonitoringRms を
+                                 ポーリングしてバーへ反映する (詳細は SettingsWindow.xaml.cs 参照)。 -->
+                            <StackPanel Margin="0,0,0,20">
+                                <TextBlock Text="マイクテスト" Style="{StaticResource FieldLabelStyle}"/>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <ProgressBar x:Name="PbMicTestLevel" Grid.Column="0" Height="8" Minimum="0" Maximum="100"
+                                                 Foreground="{StaticResource SuccessBrush}" Margin="0,0,12,0" VerticalAlignment="Center"/>
+                                    <Button x:Name="BtnToggleMicTest" Grid.Column="1" Content="マイクテスト開始" Width="160" Click="OnToggleMicTest"/>
+                                </Grid>
+                                <TextBlock Style="{StaticResource HelperTextStyle}"
+                                           Text="話すとバーが動きます (録音・送信は行いません)。"/>
+                            </StackPanel>
+
+                            <StackPanel>
+                                <TextBlock Text="入力ゲイン (dB)" Style="{StaticResource FieldLabelStyle}"/>
+                                <TextBox x:Name="TxtInputGain" Width="120" HorizontalAlignment="Left"/>
+                                <TextBlock Style="{StaticResource HelperTextStyle}" Text="マイク音量を dB 単位で増減します (-30.0 ~ 30.0 dB)。"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+
+                <!-- 録音設定 (旧「一般」タブから分離)。録音の挙動に加え、文字起こし後の
+                     自動貼り付け・コンテキスト認識といった「動作」もここにまとめる
+                     (プロンプトタブが1タブ内に「文字起こし用」「整形用」の2グループを
+                     持つのと同じ構成)。 -->
+                <TabItem Header="録音">
                     <ScrollViewer VerticalScrollBarVisibility="Auto">
                         <StackPanel MaxWidth="640" HorizontalAlignment="Left" Margin="32">
 
-                            <!-- グループ: 文字起こし (処理の1段目)。音声をテキスト化する段階。
-                                 ここで選んだプロバイダによって、下の「整形」グループの設定が使われるかどうかが変わる
-                                 (Gemini は音声から整形済みテキストまで一括生成するため、整形段は実行されない)。 -->
-                            <StackPanel Margin="0,0,0,40">
-                                <TextBlock Text="文字起こし" Style="{StaticResource GroupHeadingStyle}" Margin="0,0,0,20"/>
-                                <TextBlock Style="{StaticResource HelperTextStyle}" Margin="0,0,0,20"
-                                           Text="音声を最初にテキスト化する段階です。ここで選んだプロバイダによって、下の「整形」の設定が使われるかどうかが変わります。"/>
-
-                                <StackPanel Margin="0,0,0,20">
-                                    <TextBlock Text="プロバイダ" Style="{StaticResource FieldLabelStyle}"/>
-                                    <ComboBox x:Name="CmbProvider" MaxWidth="320" HorizontalAlignment="Stretch">
-                                        <ComboBoxItem Content="gemini"/>
-                                        <ComboBoxItem Content="groq"/>
-                                        <ComboBoxItem Content="local"/>
-                                    </ComboBox>
-                                </StackPanel>
-
-                                <!-- Gemini API キー: PasswordBox (マスク表示) と TextBox (平文表示) を重ねて、
-                                     ボタンで Visibility を切り替える。既存キーがあっても実際の値は表示せず、
-                                     下のステータス表示のみで「設定済み」を示す。 -->
-                                <StackPanel Margin="0,0,0,20">
-                                    <TextBlock Text="Gemini API キー" Style="{StaticResource FieldLabelStyle}"/>
-                                    <Grid>
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="Auto"/>
-                                        </Grid.ColumnDefinitions>
-                                        <Grid Grid.Column="0" Margin="0,0,8,0">
-                                            <PasswordBox x:Name="PwdGeminiApiKey"/>
-                                            <TextBox x:Name="TxtGeminiApiKeyVisible" Visibility="Collapsed"/>
-                                        </Grid>
-                                        <Button x:Name="BtnToggleGeminiApiKey" Grid.Column="1" Content="表示"
-                                                Click="OnToggleGeminiApiKeyVisibility" ToolTip="表示/非表示を切り替え"/>
-                                    </Grid>
-                                    <TextBlock x:Name="LblGeminiApiKeyStatus" Style="{StaticResource HelperTextStyle}"/>
-                                </StackPanel>
-
-                                <!-- Groq API キー: Gemini API キーと同じ構成。 -->
-                                <StackPanel Margin="0,0,0,20">
-                                    <TextBlock Text="Groq API キー" Style="{StaticResource FieldLabelStyle}"/>
-                                    <Grid>
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="Auto"/>
-                                        </Grid.ColumnDefinitions>
-                                        <Grid Grid.Column="0" Margin="0,0,8,0">
-                                            <PasswordBox x:Name="PwdGroqApiKey"/>
-                                            <TextBox x:Name="TxtGroqApiKeyVisible" Visibility="Collapsed"/>
-                                        </Grid>
-                                        <Button x:Name="BtnToggleGroqApiKey" Grid.Column="1" Content="表示"
-                                                Click="OnToggleGroqApiKeyVisibility" ToolTip="表示/非表示を切り替え"/>
-                                    </Grid>
-                                    <TextBlock x:Name="LblGroqApiKeyStatus" Style="{StaticResource HelperTextStyle}"/>
-                                </StackPanel>
-
-                                <StackPanel Margin="0,0,0,20">
-                                    <TextBlock Text="Gemini モデル (文字起こし用)" Style="{StaticResource FieldLabelStyle}"/>
-                                    <TextBox x:Name="TxtGeminiModel" MaxWidth="320" HorizontalAlignment="Stretch"/>
-                                    <TextBlock Style="{StaticResource HelperTextStyle}"
-                                               Text="プロバイダが Gemini のとき、音声から直接文字起こしする際に使うモデルです。下の「整形」グループの Gemini モデルとは別の設定です。"/>
-                                </StackPanel>
-
-                                <StackPanel>
-                                    <TextBlock Text="Groq Whisper モデル" Style="{StaticResource FieldLabelStyle}"/>
-                                    <ComboBox x:Name="CmbGroqWhisperModel" MaxWidth="320" HorizontalAlignment="Stretch" IsEditable="True">
-                                        <ComboBoxItem Content="whisper-large-v3"/>
-                                    </ComboBox>
-                                    <TextBlock Style="{StaticResource HelperTextStyle}"
-                                               Text="プロバイダが Groq のとき、Whisper 文字起こしに使うモデル名です。一覧に無い名前も直接入力できます。空欄のまま保存すると既定値 (whisper-large-v3) が使われます。"/>
-                                </StackPanel>
-                            </StackPanel>
-
-                            <!-- グループ: 整形 (処理の2段目)。文字起こし後のテキストをさらに整えるバックエンドの設定。
-                                 文字起こしに Gemini を選んでいる場合はこの段自体が実行されないため、
-                                 その旨を警告色のヘルパーテキストで明示する。 -->
-                            <StackPanel Margin="0,0,0,40">
-                                <TextBlock Text="整形" Style="{StaticResource GroupHeadingStyle}" Margin="0,0,0,20"/>
-                                <TextBlock Style="{StaticResource WarningHelperTextStyle}" Margin="0,0,0,20"
-                                           Text="文字起こしに Gemini を選んでいる場合、この「整形」の設定は使われません。Gemini は音声から整形済みのテキストまでを一度に生成するため、この段が実行されないためです。整形の設定が使われるのは、文字起こしが Groq のとき、またはローカルで「クラウドで整形する (ハイブリッド)」を有効にしたときのみです。"/>
-
-                                <StackPanel Margin="0,0,0,20">
-                                    <TextBlock Text="整形バックエンド" Style="{StaticResource FieldLabelStyle}"/>
-                                    <ComboBox x:Name="CmbRefineProvider" MaxWidth="320" HorizontalAlignment="Stretch">
-                                        <ComboBoxItem Content="gemini"/>
-                                        <ComboBoxItem Content="nvidia"/>
-                                    </ComboBox>
-                                    <TextBlock Style="{StaticResource HelperTextStyle}"
-                                               Text="gemini を選んだ場合は、上の「文字起こし」で入力した Gemini API キーがそのまま使われます (別途の入力は不要です)。nvidia を選んだ場合のみ、下の NVIDIA API キーが必要です。"/>
-                                </StackPanel>
-
-                                <!-- NVIDIA API キー: Gemini/Groq API キーと同じ構成。 -->
-                                <StackPanel Margin="0,0,0,20">
-                                    <TextBlock Text="NVIDIA API キー" Style="{StaticResource FieldLabelStyle}"/>
-                                    <Grid>
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="Auto"/>
-                                        </Grid.ColumnDefinitions>
-                                        <Grid Grid.Column="0" Margin="0,0,8,0">
-                                            <PasswordBox x:Name="PwdNvidiaApiKey"/>
-                                            <TextBox x:Name="TxtNvidiaApiKeyVisible" Visibility="Collapsed"/>
-                                        </Grid>
-                                        <Button x:Name="BtnToggleNvidiaApiKey" Grid.Column="1" Content="表示"
-                                                Click="OnToggleNvidiaApiKeyVisibility" ToolTip="表示/非表示を切り替え"/>
-                                    </Grid>
-                                    <TextBlock x:Name="LblNvidiaApiKeyStatus" Style="{StaticResource HelperTextStyle}"/>
-                                </StackPanel>
-
-                                <StackPanel Margin="0,0,0,20">
-                                    <TextBlock Text="Gemini モデル (整形用)" Style="{StaticResource FieldLabelStyle}"/>
-                                    <ComboBox x:Name="CmbGeminiRefineModel" MaxWidth="320" HorizontalAlignment="Stretch" IsEditable="True">
-                                        <ComboBoxItem Content="gemini-flash-lite-latest"/>
-                                    </ComboBox>
-                                    <TextBlock Style="{StaticResource HelperTextStyle}"
-                                               Text="整形バックエンドが Gemini のときに使うモデルです。上の文字起こし用 Gemini モデルとは別の設定です。空欄のまま保存すると既定値 (gemini-flash-lite-latest) が使われます。"/>
-                                </StackPanel>
-
-                                <StackPanel>
-                                    <TextBlock Text="NVIDIA モデル (整形用)" Style="{StaticResource FieldLabelStyle}"/>
-                                    <ComboBox x:Name="CmbNvidiaRefineModel" MaxWidth="320" HorizontalAlignment="Stretch" IsEditable="True">
-                                        <ComboBoxItem Content="nvidia/nemotron-3.5-lightning-30b-a3b"/>
-                                    </ComboBox>
-                                    <TextBlock Style="{StaticResource HelperTextStyle}"
-                                               Text="整形バックエンドが NVIDIA のときに使うモデルです。空欄のまま保存すると既定値 (nvidia/nemotron-3.5-lightning-30b-a3b) が使われます。"/>
-                                </StackPanel>
-                            </StackPanel>
-
-                            <!-- グループ: マイク -->
-                            <StackPanel Margin="0,0,0,40">
-                                <TextBlock Text="マイク" Style="{StaticResource GroupHeadingStyle}" Margin="0,0,0,20"/>
-
-                                <StackPanel Margin="0,0,0,20">
-                                    <TextBlock Text="入力デバイス" Style="{StaticResource FieldLabelStyle}"/>
-                                    <ComboBox x:Name="CmbMicDevice" SelectionChanged="OnMicDeviceSelectionChanged"/>
-                                </StackPanel>
-
-                                <!-- マイクテスト: 選択中のデバイスが実際に音を拾えているかをその場で確認するための
-                                     レベルメーター。NAudio のキャプチャコールバックからは直接 UI を更新せず、
-                                     DispatcherTimer (OnMicTestTimerTick) が AudioRecorder.CurrentMonitoringRms を
-                                     ポーリングしてバーへ反映する (詳細は SettingsWindow.xaml.cs 参照)。 -->
-                                <StackPanel Margin="0,0,0,20">
-                                    <TextBlock Text="マイクテスト" Style="{StaticResource FieldLabelStyle}"/>
-                                    <Grid>
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="Auto"/>
-                                        </Grid.ColumnDefinitions>
-                                        <ProgressBar x:Name="PbMicTestLevel" Grid.Column="0" Height="8" Minimum="0" Maximum="100"
-                                                     Foreground="{StaticResource SuccessBrush}" Margin="0,0,12,0" VerticalAlignment="Center"/>
-                                        <Button x:Name="BtnToggleMicTest" Grid.Column="1" Content="マイクテスト開始" Width="160" Click="OnToggleMicTest"/>
-                                    </Grid>
-                                    <TextBlock Style="{StaticResource HelperTextStyle}"
-                                               Text="開始すると、選択中のデバイスに向かって話したときにバーが動きます (ファイルへの保存や送信は一切行いません)。"/>
-                                </StackPanel>
-
-                                <StackPanel>
-                                    <TextBlock Text="入力ゲイン (dB)" Style="{StaticResource FieldLabelStyle}"/>
-                                    <TextBox x:Name="TxtInputGain" Width="120" HorizontalAlignment="Left"/>
-                                    <TextBlock Style="{StaticResource HelperTextStyle}" Text="マイク音量を dB 単位で増減します (-30.0 ~ 30.0 dB)。"/>
-                                </StackPanel>
-                            </StackPanel>
-
-                            <!-- グループ: 録音 -->
                             <StackPanel Margin="0,0,0,40">
                                 <TextBlock Text="録音" Style="{StaticResource GroupHeadingStyle}" Margin="0,0,0,20"/>
 
                                 <StackPanel Margin="0,0,0,20">
                                     <TextBlock Text="録音キー" Style="{StaticResource FieldLabelStyle}"/>
-                                    <ComboBox x:Name="CmbHoldKey" MaxWidth="320" HorizontalAlignment="Stretch">
+                                    <ComboBox x:Name="CmbHoldKey" Width="440" HorizontalAlignment="Left">
                                         <ComboBoxItem Content="alt_l (左Alt)"/>
                                         <ComboBoxItem Content="alt_r (右Alt)"/>
                                         <ComboBoxItem Content="ctrl_l (左Ctrl)"/>
@@ -552,15 +770,15 @@
                     <ScrollViewer VerticalScrollBarVisibility="Auto">
                         <StackPanel MaxWidth="640" HorizontalAlignment="Left" Margin="32">
 
-                            <TextBlock Style="{StaticResource HelperTextStyle}" Margin="0,0,0,40"
-                                       Text="ローカル (オフライン) 文字起こしの設定です。API キーやインターネット接続なしで、PC 上の Whisper モデルのみを使って文字起こしします。"/>
+                            <TextBlock Style="{StaticResource HelperTextStyle}" Margin="0,0,0,20"
+                                       Text="API キーやネット接続なしで、PC 上の Whisper モデルのみで文字起こしします。"/>
 
                             <!-- グループ: モデル -->
                             <StackPanel Margin="0,0,0,40">
                                 <TextBlock Text="モデル" Style="{StaticResource GroupHeadingStyle}" Margin="0,0,0,20"/>
                                 <StackPanel>
                                     <TextBlock Text="モデルサイズ" Style="{StaticResource FieldLabelStyle}"/>
-                                    <ComboBox x:Name="CmbLocalModelSize" MaxWidth="320" HorizontalAlignment="Stretch" SelectionChanged="OnLocalModelSizeChanged"/>
+                                    <ComboBox x:Name="CmbLocalModelSize" Width="440" HorizontalAlignment="Left" SelectionChanged="OnLocalModelSizeChanged"/>
                                     <TextBlock Style="{StaticResource HelperTextStyle}"
                                                Text="サイズが大きいほど認識精度が上がりますが、ダウンロード容量と読み込み時間も増えます。"/>
                                 </StackPanel>
@@ -575,10 +793,14 @@
                                     <TextBlock Style="{StaticResource HelperTextStyle}" Text="NVIDIA GPU が使えない環境では自動的に CPU で動作します。"/>
                                 </StackPanel>
 
+                                <!-- 【欠陥6】以前は「クラウド (Groq) の LLM で整形」と表記していたが、整形は
+                                     Groq から切り離され「整形」タブの設定 (Gemini/NVIDIA) に従うため誤り。
+                                     整形バックエンドを指す固有名詞を書かず、「整形」タブへの参照に統一する
+                                     (バックエンドが将来変わってもここを直さずに済む)。 -->
                                 <StackPanel>
                                     <CheckBox x:Name="ChkLocalRefineWithCloud" Content="クラウドで整形する (ハイブリッド)"/>
                                     <TextBlock Style="{StaticResource WarningHelperTextStyle}"
-                                               Text="有効にすると、ローカルで文字起こしした結果をさらにクラウド (Groq) の LLM で整形します。オフラインでなくなり、API キーとネットワーク接続が必要になります。音声由来のテキストが外部へ送信される点に注意してください。"/>
+                                               Text="「整形」タブの設定でクラウド整形します (ネット接続必須・テキストが外部送信されます)。"/>
                                 </StackPanel>
                             </StackPanel>
 
@@ -639,8 +861,13 @@
                                     <Button Grid.Column="1" Content="既定に戻す" Click="OnResetRefinePromptToDefault"/>
                                 </Grid>
 
+                                <!-- 【欠陥6】旧表記「Groq 文章整形 (LLaMA) プロンプト」は誤り。整形は既に
+                                     Groq から切り離され Gemini / NVIDIA が担当し、LLaMA は製品から削除済み。
+                                     表示文言のみ「整形プロンプト」に修正する。x:Name (TxtGroqRefinePrompt) と
+                                     Core/Settings.cs のプロパティ名 (GroqRefineSystemPrompt) は、JSON
+                                     キー名の後方互換のためあえて変更しない (指示どおり表示文言のみ修正)。 -->
                                 <StackPanel>
-                                    <TextBlock Text="Groq 文章整形 (LLaMA) プロンプト" Style="{StaticResource FieldLabelStyle}"/>
+                                    <TextBlock Text="整形プロンプト" Style="{StaticResource FieldLabelStyle}"/>
                                     <TextBox x:Name="TxtGroqRefinePrompt" Height="170" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
                                 </StackPanel>
                             </StackPanel>
@@ -684,9 +911,9 @@
                             <StackPanel Margin="0,0,0,40">
                                 <TextBlock Text="分類ルール" Style="{StaticResource GroupHeadingStyle}" Margin="0,0,0,20"/>
 
-                                <StackPanel Margin="0,0,0,20" MaxWidth="400" HorizontalAlignment="Left">
+                                <StackPanel Margin="0,0,0,20">
                                     <TextBlock Text="カテゴリ" Style="{StaticResource FieldLabelStyle}"/>
-                                    <ComboBox x:Name="CmbCategory" SelectionChanged="OnCategorySelectionChanged"/>
+                                    <ComboBox x:Name="CmbCategory" Width="440" HorizontalAlignment="Left" SelectionChanged="OnCategorySelectionChanged"/>
                                 </StackPanel>
 
                                 <StackPanel Margin="0,0,0,20">
@@ -720,7 +947,7 @@
                             <StackPanel>
                                 <TextBlock Text="検出済みアプリ" Style="{StaticResource GroupHeadingStyle}" Margin="0,0,0,20"/>
                                 <TextBlock Style="{StaticResource HelperTextStyle}" Margin="0,0,0,20"
-                                           Text="アクティブウィンドウを検出するたびに、まだ一覧に無いアプリ名だけが自動的に追加されます (発話のたびにファイルへ書き込むことはありません)。アプリ名・自動判定カテゴリに加えて、検出時のウィンドウタイトルの例も設定ファイルに保存されます。ウィンドウタイトルには文書名やメールの件名、チャット相手の名前などが含まれる場合がある点にご注意ください。下の一覧からアプリを選んでカテゴリを割り当てると、そのカテゴリのキーワードにも自動的に追加されます。"/>
+                                           Text="検出した新しいアプリ名を自動追加します (ウィンドウタイトル例も保存され、文書名等を含む場合があります)。カテゴリを割り当てるとキーワードにも追加されます。"/>
 
                                 <DataGrid x:Name="GridDetectedApps" AutoGenerateColumns="False" CanUserAddRows="False" IsReadOnly="True"
                                           SelectionMode="Single" Height="200" Margin="0,0,0,20">
