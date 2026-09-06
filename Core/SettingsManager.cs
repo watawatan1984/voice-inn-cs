@@ -41,7 +41,26 @@ public class SettingsManager
                 if (loaded != null)
                 {
                     FillMissingDictionaryDefaults(loaded);
+
+                    // 【既定プロンプトの自動追従】既に settings.json を保存済みのユーザーには、
+                    // Core/Settings.cs 側の既定プロンプト改善 (例: マークダウン禁止ルールの追加) が
+                    // 永久に届かない問題への対応。保存値が過去の既定値から一切編集されていない場合
+                    // のみ現在の既定値へ追いつかせ、ユーザー独自の編集は絶対に上書きしない。
+                    // 判定ロジックの詳細は Core/PromptMigration.cs 参照。
+                    var migration = PromptMigration.ApplyLegacyDefaults(loaded, new AppSettings());
+
                     Settings = loaded;
+
+                    if (migration.Changed)
+                    {
+                        // 【厳守】プロンプト本文はログに書かない。更新したキー名のみを記録する
+                        // (プロンプトにはユーザーが業務上の固有名詞を書き込んでいる可能性があるため)。
+                        Logger.Info($"Migrated legacy default prompts: {string.Join(", ", migration.UpdatedKeys)}");
+
+                        // 移行が発生したときだけ書き戻す (変化が無ければ毎回の保存は行わない)。
+                        // 既存のアトミック書き込み経路 (Save()) をそのまま使う。
+                        Save();
+                    }
                 }
             }
         }
