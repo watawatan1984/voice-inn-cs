@@ -119,8 +119,26 @@ public partial class SettingsWindow : Window
         // Groq API キー: 同上
         InitializeApiKeyField(PwdGroqApiKey, TxtGroqApiKeyVisible, LblGroqApiKeyStatus, "GROQ_API_KEY");
 
-        // Geminiモデル
+        // Geminiモデル (文字起こし用)
         TxtGeminiModel.Text = Environment.GetEnvironmentVariable("GEMINI_MODEL") ?? "gemini-2.5-flash";
+
+        // Groq Whisper モデル (文字起こし用)
+        CmbGroqWhisperModel.Text = Environment.GetEnvironmentVariable("GROQ_WHISPER_MODEL") ?? "whisper-large-v3";
+
+        // 整形バックエンド (gemini/nvidia の2択。Core/Settings.cs の AppSettings.RefineProvider、
+        // 大文字小文字は区別しない。未知の値が入っていた場合も CmbProvider と同じ方針で gemini 側にフォールバックする)。
+        CmbRefineProvider.SelectedIndex = settings.RefineProvider?.ToLowerInvariant() switch
+        {
+            "nvidia" => 1,
+            _ => 0
+        };
+
+        // NVIDIA API キー: Gemini/Groq と同じく、設定済みでも実際の値は表示せずステータス表示のみ行う
+        InitializeApiKeyField(PwdNvidiaApiKey, TxtNvidiaApiKeyVisible, LblNvidiaApiKeyStatus, "NVIDIA_API_KEY");
+
+        // Gemini 整形モデル・NVIDIA 整形モデル (いずれも Ai/*RefineProvider.cs 側の既定値と揃える)
+        CmbGeminiRefineModel.Text = Environment.GetEnvironmentVariable("GEMINI_REFINE_MODEL") ?? "gemini-flash-lite-latest";
+        CmbNvidiaRefineModel.Text = Environment.GetEnvironmentVariable("NVIDIA_REFINE_MODEL") ?? "nvidia/nemotron-3.5-lightning-30b-a3b";
 
         // マイク一覧
         var mics = AudioRecorder.GetInputDevices();
@@ -845,13 +863,50 @@ public partial class SettingsWindow : Window
             EnvLoader.TryWriteKey("GROQ_API_KEY", groqApiKeyInput);
         }
 
-        // Geminiモデル
+        // Geminiモデル (文字起こし用)
         if (!string.IsNullOrWhiteSpace(TxtGeminiModel.Text))
         {
             string geminiModel = TxtGeminiModel.Text.Trim();
             Environment.SetEnvironmentVariable("GEMINI_MODEL", geminiModel);
             // 次回起動後もモデル設定が保持されるよう .env にも書き戻す。
             EnvLoader.TryWriteKey("GEMINI_MODEL", geminiModel);
+        }
+
+        // Groq Whisper モデル (文字起こし用): 空欄のまま保存された場合は環境変数へ書き込まず、
+        // Ai/GroqProvider.cs 側のコード既定値 (whisper-large-v3) がそのまま使われるようにする
+        // (誤って欄を空にしても壊れないようにするためのガード)。
+        if (TryGetModelEnvValueToWrite(CmbGroqWhisperModel.Text, out string groqWhisperModel))
+        {
+            Environment.SetEnvironmentVariable("GROQ_WHISPER_MODEL", groqWhisperModel);
+            EnvLoader.TryWriteKey("GROQ_WHISPER_MODEL", groqWhisperModel);
+        }
+
+        // 整形バックエンド (gemini/nvidia)。settings.json 側の設定であり、GEMINI_MODEL 等の
+        // 環境変数とは異なり、この下の SettingsManager.Instance.Save() で永続化される。
+        string selectedRefineProvider = (CmbRefineProvider.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "gemini";
+        settings.RefineProvider = selectedRefineProvider;
+
+        // NVIDIA API キー: Gemini/Groq API キーと全く同じガード。空欄のまま保存された場合は
+        // 既存のキーを一切変更しない (マスクされた欄に何も入力しなかっただけでキーが消えてしまう事故を防ぐため)。
+        string nvidiaApiKeyInput = ReadApiKeyInput(PwdNvidiaApiKey, TxtNvidiaApiKeyVisible);
+        if (!string.IsNullOrEmpty(nvidiaApiKeyInput))
+        {
+            Environment.SetEnvironmentVariable("NVIDIA_API_KEY", nvidiaApiKeyInput);
+            EnvLoader.TryWriteKey("NVIDIA_API_KEY", nvidiaApiKeyInput);
+        }
+
+        // Gemini 整形モデル・NVIDIA 整形モデル: Groq Whisper モデルと同じガード
+        // (空欄のまま保存された場合は書き込まず、Ai/*RefineProvider.cs 側の既定値を使わせる)。
+        if (TryGetModelEnvValueToWrite(CmbGeminiRefineModel.Text, out string geminiRefineModel))
+        {
+            Environment.SetEnvironmentVariable("GEMINI_REFINE_MODEL", geminiRefineModel);
+            EnvLoader.TryWriteKey("GEMINI_REFINE_MODEL", geminiRefineModel);
+        }
+
+        if (TryGetModelEnvValueToWrite(CmbNvidiaRefineModel.Text, out string nvidiaRefineModel))
+        {
+            Environment.SetEnvironmentVariable("NVIDIA_REFINE_MODEL", nvidiaRefineModel);
+            EnvLoader.TryWriteKey("NVIDIA_REFINE_MODEL", nvidiaRefineModel);
         }
 
         // マイクデバイス
@@ -1129,6 +1184,35 @@ public partial class SettingsWindow : Window
     private void OnToggleGroqApiKeyVisibility(object sender, RoutedEventArgs e)
     {
         ToggleApiKeyVisibility(PwdGroqApiKey, TxtGroqApiKeyVisible);
+    }
+
+    private void OnToggleNvidiaApiKeyVisibility(object sender, RoutedEventArgs e)
+    {
+        ToggleApiKeyVisibility(PwdNvidiaApiKey, TxtNvidiaApiKeyVisible);
+    }
+
+    /// <summary>
+    /// モデル名入力欄 (ComboBox.Text) の内容が環境変数へ書き込むべき値かどうかを判定する
+    /// 純粋関数。空文字列・null・空白のみの場合は false を返し、value には空文字列を設定する
+    /// (呼び出し側は環境変数への書き込みを一切行わないこと。Ai/GroqProvider.cs や
+    /// Ai/*RefineProvider.cs 側のコード既定値 (whisper-large-v3 等) がそのまま使われる)。
+    /// 前後の空白を除去した値は value で返し、呼び出し側はそのまま
+    /// Environment.SetEnvironmentVariable / EnvLoader.TryWriteKey へ渡せる。
+    ///
+    /// SettingsManager.Instance / EnvLoader.TryWriteKey など副作用のある処理は一切行わないため、
+    /// SettingsWindowResetToDefaultTests.cs 等と同じく、WPF ホスト無しの単体テストから
+    /// internal static なメソッドとして直接呼び出して検証できる。
+    /// </summary>
+    internal static bool TryGetModelEnvValueToWrite(string? inputText, out string value)
+    {
+        if (string.IsNullOrWhiteSpace(inputText))
+        {
+            value = string.Empty;
+            return false;
+        }
+
+        value = inputText.Trim();
+        return true;
     }
 
     /// <summary>

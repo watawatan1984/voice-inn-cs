@@ -116,6 +116,24 @@
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="8,6"/>
             <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Style.Resources>
+                <!-- IsEditable="True" の ComboBox は、テンプレート内部に PART_EditableTextBox
+                     という TextBox を持つ。この Window.Resources にある TextBox の暗黙スタイルは
+                     テンプレート内部にも適用されるため、そのままだと内側の TextBox にも
+                     罫線 1px と余白 8,6 が付き、ComboBox 自身の枠と合わせて二重枠・二重余白に
+                     見えてしまう。内部の編集領域だけは枠と塗りを持たせず、外側の ComboBox の
+                     見た目に委ねる。 -->
+                <Style TargetType="TextBox">
+                    <Setter Property="Background" Value="Transparent"/>
+                    <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}"/>
+                    <Setter Property="BorderThickness" Value="0"/>
+                    <Setter Property="Padding" Value="0"/>
+                    <Setter Property="CaretBrush" Value="{StaticResource TextPrimaryBrush}"/>
+                    <Setter Property="SelectionBrush" Value="{StaticResource SurfaceRaisedBrush}"/>
+                    <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                    <Setter Property="VerticalContentAlignment" Value="Center"/>
+                </Style>
+            </Style.Resources>
             <Style.Triggers>
                 <Trigger Property="IsKeyboardFocusWithin" Value="True">
                     <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
@@ -325,9 +343,13 @@
                     <ScrollViewer VerticalScrollBarVisibility="Auto">
                         <StackPanel MaxWidth="640" HorizontalAlignment="Left" Margin="32">
 
-                            <!-- グループ: AI プロバイダ -->
+                            <!-- グループ: 文字起こし (処理の1段目)。音声をテキスト化する段階。
+                                 ここで選んだプロバイダによって、下の「整形」グループの設定が使われるかどうかが変わる
+                                 (Gemini は音声から整形済みテキストまで一括生成するため、整形段は実行されない)。 -->
                             <StackPanel Margin="0,0,0,40">
-                                <TextBlock Text="AI プロバイダ" Style="{StaticResource GroupHeadingStyle}" Margin="0,0,0,20"/>
+                                <TextBlock Text="文字起こし" Style="{StaticResource GroupHeadingStyle}" Margin="0,0,0,20"/>
+                                <TextBlock Style="{StaticResource HelperTextStyle}" Margin="0,0,0,20"
+                                           Text="音声を最初にテキスト化する段階です。ここで選んだプロバイダによって、下の「整形」の設定が使われるかどうかが変わります。"/>
 
                                 <StackPanel Margin="0,0,0,20">
                                     <TextBlock Text="プロバイダ" Style="{StaticResource FieldLabelStyle}"/>
@@ -376,9 +398,75 @@
                                     <TextBlock x:Name="LblGroqApiKeyStatus" Style="{StaticResource HelperTextStyle}"/>
                                 </StackPanel>
 
-                                <StackPanel>
-                                    <TextBlock Text="Gemini モデル" Style="{StaticResource FieldLabelStyle}"/>
+                                <StackPanel Margin="0,0,0,20">
+                                    <TextBlock Text="Gemini モデル (文字起こし用)" Style="{StaticResource FieldLabelStyle}"/>
                                     <TextBox x:Name="TxtGeminiModel" MaxWidth="320" HorizontalAlignment="Stretch"/>
+                                    <TextBlock Style="{StaticResource HelperTextStyle}"
+                                               Text="プロバイダが Gemini のとき、音声から直接文字起こしする際に使うモデルです。下の「整形」グループの Gemini モデルとは別の設定です。"/>
+                                </StackPanel>
+
+                                <StackPanel>
+                                    <TextBlock Text="Groq Whisper モデル" Style="{StaticResource FieldLabelStyle}"/>
+                                    <ComboBox x:Name="CmbGroqWhisperModel" MaxWidth="320" HorizontalAlignment="Stretch" IsEditable="True">
+                                        <ComboBoxItem Content="whisper-large-v3"/>
+                                    </ComboBox>
+                                    <TextBlock Style="{StaticResource HelperTextStyle}"
+                                               Text="プロバイダが Groq のとき、Whisper 文字起こしに使うモデル名です。一覧に無い名前も直接入力できます。空欄のまま保存すると既定値 (whisper-large-v3) が使われます。"/>
+                                </StackPanel>
+                            </StackPanel>
+
+                            <!-- グループ: 整形 (処理の2段目)。文字起こし後のテキストをさらに整えるバックエンドの設定。
+                                 文字起こしに Gemini を選んでいる場合はこの段自体が実行されないため、
+                                 その旨を警告色のヘルパーテキストで明示する。 -->
+                            <StackPanel Margin="0,0,0,40">
+                                <TextBlock Text="整形" Style="{StaticResource GroupHeadingStyle}" Margin="0,0,0,20"/>
+                                <TextBlock Style="{StaticResource WarningHelperTextStyle}" Margin="0,0,0,20"
+                                           Text="文字起こしに Gemini を選んでいる場合、この「整形」の設定は使われません。Gemini は音声から整形済みのテキストまでを一度に生成するため、この段が実行されないためです。整形の設定が使われるのは、文字起こしが Groq のとき、またはローカルで「クラウドで整形する (ハイブリッド)」を有効にしたときのみです。"/>
+
+                                <StackPanel Margin="0,0,0,20">
+                                    <TextBlock Text="整形バックエンド" Style="{StaticResource FieldLabelStyle}"/>
+                                    <ComboBox x:Name="CmbRefineProvider" MaxWidth="320" HorizontalAlignment="Stretch">
+                                        <ComboBoxItem Content="gemini"/>
+                                        <ComboBoxItem Content="nvidia"/>
+                                    </ComboBox>
+                                    <TextBlock Style="{StaticResource HelperTextStyle}"
+                                               Text="gemini を選んだ場合は、上の「文字起こし」で入力した Gemini API キーがそのまま使われます (別途の入力は不要です)。nvidia を選んだ場合のみ、下の NVIDIA API キーが必要です。"/>
+                                </StackPanel>
+
+                                <!-- NVIDIA API キー: Gemini/Groq API キーと同じ構成。 -->
+                                <StackPanel Margin="0,0,0,20">
+                                    <TextBlock Text="NVIDIA API キー" Style="{StaticResource FieldLabelStyle}"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Grid Grid.Column="0" Margin="0,0,8,0">
+                                            <PasswordBox x:Name="PwdNvidiaApiKey"/>
+                                            <TextBox x:Name="TxtNvidiaApiKeyVisible" Visibility="Collapsed"/>
+                                        </Grid>
+                                        <Button x:Name="BtnToggleNvidiaApiKey" Grid.Column="1" Content="表示"
+                                                Click="OnToggleNvidiaApiKeyVisibility" ToolTip="表示/非表示を切り替え"/>
+                                    </Grid>
+                                    <TextBlock x:Name="LblNvidiaApiKeyStatus" Style="{StaticResource HelperTextStyle}"/>
+                                </StackPanel>
+
+                                <StackPanel Margin="0,0,0,20">
+                                    <TextBlock Text="Gemini モデル (整形用)" Style="{StaticResource FieldLabelStyle}"/>
+                                    <ComboBox x:Name="CmbGeminiRefineModel" MaxWidth="320" HorizontalAlignment="Stretch" IsEditable="True">
+                                        <ComboBoxItem Content="gemini-flash-lite-latest"/>
+                                    </ComboBox>
+                                    <TextBlock Style="{StaticResource HelperTextStyle}"
+                                               Text="整形バックエンドが Gemini のときに使うモデルです。上の文字起こし用 Gemini モデルとは別の設定です。空欄のまま保存すると既定値 (gemini-flash-lite-latest) が使われます。"/>
+                                </StackPanel>
+
+                                <StackPanel>
+                                    <TextBlock Text="NVIDIA モデル (整形用)" Style="{StaticResource FieldLabelStyle}"/>
+                                    <ComboBox x:Name="CmbNvidiaRefineModel" MaxWidth="320" HorizontalAlignment="Stretch" IsEditable="True">
+                                        <ComboBoxItem Content="nvidia/nemotron-3.5-lightning-30b-a3b"/>
+                                    </ComboBox>
+                                    <TextBlock Style="{StaticResource HelperTextStyle}"
+                                               Text="整形バックエンドが NVIDIA のときに使うモデルです。空欄のまま保存すると既定値 (nvidia/nemotron-3.5-lightning-30b-a3b) が使われます。"/>
                                 </StackPanel>
                             </StackPanel>
 
