@@ -2,8 +2,6 @@ using System;
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Text;
-using System.Text.Json;
 using System.Threading.Tasks;
 using VoiceIn.Core;
 
@@ -30,16 +28,33 @@ public class GroqProvider : IAiProvider
         string whisperPrompt = prompts.GroqWhisperPrompt;
         string refineSystemPrompt = prompt; // コンテキスト最適化済みの整形プロンプト
 
-        // 1. Whisper Transcription
+        // 1. Whisper Transcription (Groq はこの文字起こし専用。整形は行わない)
         string rawText = await TranscribeAudioAsync(audioFilePath, apiKey, whisperPrompt);
         if (string.IsNullOrWhiteSpace(rawText) || rawText.Trim() == whisperPrompt.Trim())
         {
             return string.Empty;
         }
 
-        // 2. LLaMA Refinement
-        string refinedText = await RefineTextAsync(rawText, apiKey, refineSystemPrompt);
-        return refinedText;
+        // 2. 整形 (Gemini/NVIDIA。Ai/RefineProviderFactory が Core/Settings.cs の設定に
+        //    従って解決する。以前は Groq 自身のチャットモデルで整形していたが、Groq 側の
+        //    整形用モデル提供終了で整形が丸ごと壊れる事故が起きたため切り離した)。
+        //
+        // 整形はあくまで付加価値であり、Whisper の文字起こし自体は既に成功している。
+        // 整形バックエンド側の障害 (API キー未設定・通信エラー・モデル提供終了など) で
+        // この関数全体を失敗させると、まさに今回切り離す原因となった事故
+        // (整形が壊れて発話ごと失われる) を再発させてしまう。そのため
+        // Ai/LocalProvider.cs のハイブリッド整形と同じ方針で、整形の失敗はログに
+        // 残すのみに留め、生の文字起こし結果へフォールバックする。
+        var refineProvider = RefineProviderFactory.CreateProvider();
+        try
+        {
+            return await refineProvider.RefineAsync(rawText, refineSystemPrompt);
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"GroqProvider: 整形に失敗したため生の文字起こし結果を返します -- {ex.GetType().Name}: {ex.Message}");
+            return rawText;
+        }
     }
 
     private async Task<string> TranscribeAudioAsync(string audioFilePath, string apiKey, string prompt)
@@ -78,80 +93,6 @@ public class GroqProvider : IAiProvider
         }
 
         return result.Trim();
-    }
-
-    /// <summary>
-    /// 生の文字起こしテキストを Groq の LLM で整形して返す (テキストイン・テキストアウト)。
-    /// LocalProvider のハイブリッドモード (ローカルで文字起こし → クラウド LLM で整形) から
-    /// 再利用するために、内部の 3 引数版から API キー解決のみを切り出して public 化している。
-    /// GROQ_API_KEY が未設定の場合は例外を投げるので、呼び出し側 (LocalProvider) で
-    /// キャッチし、整形をあきらめて生の文字起こし結果を返すフォールバックを行うこと。
-    /// </summary>
-    public async Task<string> RefineTextAsync(string rawText, string systemPrompt)
-    {
-        string? apiKey = Environment.GetEnvironmentVariable("GROQ_API_KEY");
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            throw new InvalidOperationException("GROQ_API_KEY が設定されていません。.env ファイルを確認してください。");
-        }
-
-        return await RefineTextAsync(rawText, apiKey, systemPrompt);
-    }
-
-    private async Task<string> RefineTextAsync(string rawText, string apiKey, string systemPrompt)
-    {
-        using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.groq.com/openai/v1/chat/completions");
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-
-        // モデル名は環境変数で上書き可能にする (GeminiProvider の GEMINI_MODEL と同様の方式)。
-        //
-        // 既定値について: 以前は llama-3.3-70b-versatile を使っていたが、Groq 側で提供が
-        // 終了しており "model_not_found" (404) で整形が必ず失敗する状態になっていた。
-        // Groq のモデル一覧 API で実際に利用可能なモデルを確認し、この用途 (音声認識テキストの
-        // 整形) で実際に試したうえで openai/gpt-oss-120b を既定とした。
-        //
-        // qwen/qwen3.8-27b はおよそ 3 倍高速だが、整形結果にマークダウンのバッククォートを
-        // 挿入することがある。このツールは任意のアプリへプレーンテキストとして貼り付けるため、
-        // 記号がそのまま混入するのは不具合になる。速度より出力の素直さを優先した。
-        // 速度を重視する場合は GROQ_REFINE_MODEL で切り替えられる。
-        string refineModel = Environment.GetEnvironmentVariable("GROQ_REFINE_MODEL") ?? "openai/gpt-oss-120b";
-
-        var payload = new
-        {
-            model = refineModel,
-            temperature = 0.0,
-            messages = new object[]
-            {
-                new { role = "system", content = systemPrompt },
-                new { role = "user", content = rawText }
-            }
-        };
-
-        string jsonPayload = JsonSerializer.Serialize(payload);
-        request.Content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
-
-        using var response = await _httpClient.SendAsync(request);
-        string result = await response.Content.ReadAsStringAsync();
-
-        if (!response.IsSuccessStatusCode)
-        {
-            // 例外メッセージは App.xaml.cs 経由で history.json に平文保存され、バルーン通知にも
-            // 表示される。API レスポンス本文を無制限に含めないよう、先頭 500 文字程度に切り詰める。
-            throw new HttpRequestException($"Groq Refine エラー ({(int)response.StatusCode}): {TruncateForError(result)}");
-        }
-
-        using var doc = JsonDocument.Parse(result);
-        var root = doc.RootElement;
-        if (root.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0)
-        {
-            var msg = choices[0].GetProperty("message");
-            if (msg.TryGetProperty("content", out var contentElem))
-            {
-                return contentElem.GetString()?.Trim() ?? string.Empty;
-            }
-        }
-
-        return rawText;
     }
 
     /// <summary>

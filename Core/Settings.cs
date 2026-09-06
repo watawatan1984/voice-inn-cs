@@ -44,6 +44,20 @@ public class PromptSettings
     [JsonPropertyName("groq_whisper_prompt")]
     public string GroqWhisperPrompt { get; set; } = "あなたは一流のプロの文字起こし専門家です。音声入力による日本語の文字起こしです。";
 
+    // 【実害のある不具合の修正】ルール6 (プレーンテキスト厳守) が無いと、整形モデルが
+    // 「`npm run build`」のようにコマンド名をバッククォートで囲んで返すことがあり、
+    // Slack や Word など貼り付け先にその記号がそのまま入ってしまう
+    // (旧 Groq 整形の qwen/qwen3.8-27b で実際に確認されていた事象と同種)。
+    // 管理側の実測で、このルールを追加すると Gemini・NVIDIA いずれの整形バックエンドでも
+    // 解消することを確認済み。
+    //
+    // 【注意: 既存ユーザーへの到達性】この既定値はプロパティの初期値であり、
+    // settings.json に groq_refine_system_prompt が既に保存されている場合はそちらが
+    // 優先されそのまま使われ続ける (SettingsManager.Load は JSON にある値をそのまま
+    // デシリアライズで上書きするだけで、Dictionary 系プロパティ向けの
+    // FillMissingDictionaryDefaults のようなマージ処理は文字列プロパティには効かない)。
+    // つまり一度でも設定画面で保存したことがあるユーザーには、この修正は自動的には届かない
+    // (設定画面でプロンプトを再入力するか、settings.json 側を編集/削除する必要がある)。
     [JsonPropertyName("groq_refine_system_prompt")]
     public string GroqRefineSystemPrompt { get; set; } =
         """
@@ -58,6 +72,7 @@ public class PromptSettings
         3. **フィラー完全除去**: 「えー」「あー」「そのー」などの無意味な言葉は跡形もなく消してください。
         4. **自然な日本語**: 助詞（てにをは）を整え、です・ます調で統一した読みやすい文章にしてください。
         5. **出力のみ**: 修正後のテキストだけを出力すること。返事や挨拶は不要。
+        6. **プレーンテキスト厳守**: 出力はプレーンテキストのみとすること。マークダウン記法（バッククォート、アスタリスク、見出し記号(#)など）を一切使わないこと。コマンド名やコード片もマークダウン装飾を付けず、そのまま地の文として書くこと。
         """;
 
     [JsonPropertyName("gemini_transcribe_prompt")]
@@ -158,6 +173,28 @@ public class AppSettings
     [JsonPropertyName("local")]
     public LocalSettings Local { get; set; } = new();
 
+    /// <summary>
+    /// 文字起こし後のテキストを整形するバックエンド ("gemini" または "nvidia"、
+    /// 大文字小文字は区別しない。解決ロジックは Ai/RefineProviderFactory)。
+    ///
+    /// 【経緯】以前は Groq のチャットモデルが文字起こしと整形の両方を担っていたが、
+    /// Groq 側で整形用チャットモデルの提供が終了し整形が丸ごと壊れる事故が実際に起きた。
+    /// そのため整形処理は文字起こし (Ai/GroqProvider.cs、Whisper 専用になった) から
+    /// 切り離し、差し替え可能なバックエンドとして独立させた。Ai/GroqProvider.cs と
+    /// Ai/LocalProvider.cs (RefineWithCloud=true のハイブリッドモード) の両方が、
+    /// この設定に従って整形バックエンドを選ぶ。
+    ///
+    /// 既定は "gemini" (実測でレイテンシ・専門用語変換の精度ともに良好だったため)。
+    /// 既存の settings.json にこのキーが無い場合 (本設定追加前のファイル) でも、
+    /// このプロパティ既定値によりそのまま "gemini" として動作する
+    /// (System.Text.Json は JSON に無いプロパティをプロパティ既定値のままにするため、
+    /// Dictionary 系プロパティ向けの SettingsManager.FillMissingDictionaryDefaults の
+    /// ようなマージ処理は不要)。未知の値も Ai/RefineProviderFactory が Gemini へ
+    /// フォールバックし、例外にはならない。
+    /// </summary>
+    [JsonPropertyName("refine_provider")]
+    public string RefineProvider { get; set; } = "gemini";
+
     [JsonPropertyName("dictionary")]
     public Dictionary<string, string> Dictionary { get; set; } = [];
 
@@ -201,9 +238,9 @@ public class AppSettings
     [JsonPropertyName("category_prompts")]
     public Dictionary<string, string> CategoryPrompts { get; set; } = new()
     {
-        ["DEV"] = "あなたは熟練のプログラマです。\n\n【指示】\n- 入力テキストをコードコメント、コミットメッセージ、または変数名として適切な形式に変換\n- 変数名は snake_case または camelCase を適用\n- ライブラリ名・コマンド名・専門用語は正しい英単語スペルに修正\n- 出力は極めて簡潔に",
-        ["BIZ"] = "あなたは優秀なビジネス秘書です。\n\n【指示】\n- 口語体を丁寧な「ビジネス敬語（です・ます調）」に変換\n- メールやチャットとして適切な形式に整形\n- 文脈に応じて適切な改行を挿入",
-        ["DOC"] = "あなたはプロのライター・編集者です。\n\n【指示】\n- 論理構成を整え、読みやすい「書き言葉」に変換\n- 必要であればMarkdown形式（箇条書き等）を使用\n- 文体を入力の雰囲気に合わせて統一",
-        ["STD"] = "あなたは優秀なテクニカルライターAIです。\n\n【指示】\n- フィラー（えー、あー）を完全に除去\n- IT用語・固有名詞は英単語化（カタカナ禁止）\n- 誤字脱字を修正\n- 自然な日本語の文章に整形"
+        ["DEV"] = "あなたは熟練のプログラマです。\n\n【指示】\n- 入力テキストをコードコメント、コミットメッセージ、または変数名として適切な形式に変換\n- 変数名は snake_case または camelCase を適用\n- ライブラリ名・コマンド名・専門用語は正しい英単語スペルに修正\n- 出力は極めて簡潔に\n- 出力はプレーンテキストのみ。バッククォート・アスタリスク・見出し記号などのマークダウン記法は一切使わない（コマンド名やコード片も地の文として書く）",
+        ["BIZ"] = "あなたは優秀なビジネス秘書です。\n\n【指示】\n- 口語体を丁寧な「ビジネス敬語（です・ます調）」に変換\n- メールやチャットとして適切な形式に整形\n- 文脈に応じて適切な改行を挿入\n- 出力はプレーンテキストのみ。バッククォート・アスタリスク・見出し記号などのマークダウン記法は一切使わない（コマンド名やコード片も地の文として書く）",
+        ["DOC"] = "あなたはプロのライター・編集者です。\n\n【指示】\n- 論理構成を整え、読みやすい「書き言葉」に変換\n- 構造化が必要なら箇条書き（行頭の「・」や「- 」）までは使ってよい\n- ただしバッククォートによるコード表記は使わない（Word やメモ帳など Markdown を解釈しない貼り付け先では記号がそのまま残るため）\n- 文体を入力の雰囲気に合わせて統一",
+        ["STD"] = "あなたは優秀なテクニカルライターAIです。\n\n【指示】\n- フィラー（えー、あー）を完全に除去\n- IT用語・固有名詞は英単語化（カタカナ禁止）\n- 誤字脱字を修正\n- 自然な日本語の文章に整形\n- 出力はプレーンテキストのみ。バッククォート・アスタリスク・見出し記号などのマークダウン記法は一切使わない（コマンド名やコード片も地の文として書く）"
     };
 }
