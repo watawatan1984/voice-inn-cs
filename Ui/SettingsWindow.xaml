@@ -605,11 +605,19 @@
 
                             <StackPanel>
                                 <TextBlock Text="Groq Whisper モデル" Style="{StaticResource FieldLabelStyle}"/>
-                                <ComboBox x:Name="CmbGroqWhisperModel" Width="440" HorizontalAlignment="Left" IsEditable="True">
-                                    <ComboBoxItem Content="whisper-large-v3"/>
-                                </ComboBox>
+                                <Grid Width="440" HorizontalAlignment="Left">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <ComboBox x:Name="CmbGroqWhisperModel" Grid.Column="0" Margin="0,0,8,0"
+                                              IsEditable="True" IsTextSearchEnabled="False"/>
+                                    <Button x:Name="BtnRefreshGroqWhisperModel" Grid.Column="1" Content="更新"
+                                            Click="OnRefreshGroqWhisperModel" ToolTip="Groq からモデル一覧を取得します"/>
+                                </Grid>
                                 <TextBlock Style="{StaticResource HelperTextStyle}"
-                                           Text="Groq Whisper のモデル名です。空欄なら既定値 (whisper-large-v3) を使用します。"/>
+                                           Text="Groq Whisper のモデル名です。一覧に無いモデル名も直接入力できます。空欄なら既定値 (whisper-large-v3) を使用します。"/>
+                                <TextBlock x:Name="LblGroqWhisperModelStatus" Style="{StaticResource HelperTextStyle}" Margin="0,4,0,0" Visibility="Collapsed"/>
                             </StackPanel>
                         </StackPanel>
                     </ScrollViewer>
@@ -658,20 +666,36 @@
 
                             <StackPanel Margin="0,0,0,20">
                                 <TextBlock Text="Gemini モデル (整形用)" Style="{StaticResource FieldLabelStyle}"/>
-                                <ComboBox x:Name="CmbGeminiRefineModel" Width="440" HorizontalAlignment="Left" IsEditable="True">
-                                    <ComboBoxItem Content="gemini-flash-lite-latest"/>
-                                </ComboBox>
+                                <Grid Width="440" HorizontalAlignment="Left">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <ComboBox x:Name="CmbGeminiRefineModel" Grid.Column="0" Margin="0,0,8,0"
+                                              IsEditable="True" IsTextSearchEnabled="False"/>
+                                    <Button x:Name="BtnRefreshGeminiRefineModel" Grid.Column="1" Content="更新"
+                                            Click="OnRefreshGeminiRefineModel" ToolTip="Gemini からモデル一覧を取得します"/>
+                                </Grid>
                                 <TextBlock Style="{StaticResource HelperTextStyle}"
-                                           Text="整形用の Gemini モデルです (文字起こし用とは別)。空欄なら既定値を使用します。"/>
+                                           Text="整形用の Gemini モデルです (文字起こし用とは別)。一覧に無いモデル名も直接入力できます。空欄なら既定値を使用します。"/>
+                                <TextBlock x:Name="LblGeminiRefineModelStatus" Style="{StaticResource HelperTextStyle}" Margin="0,4,0,0" Visibility="Collapsed"/>
                             </StackPanel>
 
                             <StackPanel>
                                 <TextBlock Text="NVIDIA モデル (整形用)" Style="{StaticResource FieldLabelStyle}"/>
-                                <ComboBox x:Name="CmbNvidiaRefineModel" Width="440" HorizontalAlignment="Left" IsEditable="True">
-                                    <ComboBoxItem Content="nvidia/nemotron-3.5-lightning-30b-a3b"/>
-                                </ComboBox>
+                                <Grid Width="440" HorizontalAlignment="Left">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <ComboBox x:Name="CmbNvidiaRefineModel" Grid.Column="0" Margin="0,0,8,0"
+                                              IsEditable="True" IsTextSearchEnabled="False"/>
+                                    <Button x:Name="BtnRefreshNvidiaRefineModel" Grid.Column="1" Content="更新"
+                                            Click="OnRefreshNvidiaRefineModel" ToolTip="NVIDIA からモデル一覧を取得します"/>
+                                </Grid>
                                 <TextBlock Style="{StaticResource HelperTextStyle}"
-                                           Text="整形用の NVIDIA モデルです。空欄なら既定値を使用します。"/>
+                                           Text="整形用の NVIDIA モデルです。一覧に無いモデル名も直接入力できます。空欄なら既定値を使用します。"/>
+                                <TextBlock x:Name="LblNvidiaRefineModelStatus" Style="{StaticResource HelperTextStyle}" Margin="0,4,0,0" Visibility="Collapsed"/>
                             </StackPanel>
                         </StackPanel>
                     </ScrollViewer>
