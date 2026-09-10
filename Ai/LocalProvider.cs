@@ -13,8 +13,11 @@ namespace VoiceIn.Ai;
 /// Whisper.net (whisper.cpp の .NET バインディング) を使ったローカル (オフライン) 音声認識プロバイダ。
 /// 移植元 Python 版 (src/ai/providers/local.py, faster-whisper 使用) と同じく、既定では
 /// 整形を一切行わず生の文字起こし結果をそのまま返す。設定 (Local.RefineWithCloud) が true の
-/// 場合のみ、GroqProvider の LLM 整形ロジックを再利用してクラウド側で追加整形する
-/// (ハイブリッドモード)。
+/// 場合のみ、Ai/RefineProviderFactory が解決する整形バックエンド (既定 Gemini、設定で
+/// NVIDIA にも切替可能) を使ってクラウド側で追加整形する (ハイブリッドモード)。
+/// 以前は Groq の LLM で整形していたが、Groq 側で整形用チャットモデルの提供が終了する
+/// 事故が起きたため、整形処理は Groq (Whisper による文字起こし専用になった) から
+/// 切り離されている。
 /// </summary>
 public class LocalProvider : IAiProvider
 {
@@ -101,13 +104,14 @@ public class LocalProvider : IAiProvider
             return rawText;
         }
 
-        // ハイブリッドモード: ローカルの生テキストをクラウド LLM (Groq) で整形する。
+        // ハイブリッドモード: ローカルの生テキストをクラウド LLM (Ai/RefineProviderFactory が
+        // 解決する Gemini/NVIDIA) で整形する。
         // 整形はあくまで付加価値であり、失敗 (API キー未設定・通信エラー等) しても
         // 文字起こし結果そのものは絶対に失わせない。生テキストへフォールバックする。
         try
         {
-            var groqProvider = new GroqProvider();
-            return await groqProvider.RefineTextAsync(rawText, prompt);
+            var refineProvider = RefineProviderFactory.CreateProvider();
+            return await refineProvider.RefineAsync(rawText, prompt);
         }
         catch (Exception ex)
         {

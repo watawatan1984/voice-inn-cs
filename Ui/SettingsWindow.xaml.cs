@@ -2,6 +2,8 @@ using System;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.IO;
+using System.Net.Http;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -69,6 +71,13 @@ public partial class SettingsWindow : Window
     // キャンセルできるよう、Closed イベントでも参照する。
     private CancellationTokenSource? _modelDownloadCts;
 
+    // Ai/ModelCatalog.cs によるモデル一覧取得 (「更新」ボタン3つ: Groq Whisper / Gemini 整形 /
+    // NVIDIA 整形) 共通のキャンセル用トークンソース。_modelDownloadCts と異なり操作ごとに
+    // 使い捨てにはせず、ウィンドウの生存期間全体で1つを使い回す (同時に複数の「更新」を
+    // 押しても構わない軽量な GET 通信であり、ダウンロードのような明示的なキャンセル UI も
+    // 無いため)。ウィンドウを閉じたときに Closed イベントで確実にキャンセルする。
+    private readonly CancellationTokenSource _modelCatalogCts = new();
+
     // マイクテスト (レベルメーター) 専用の AudioRecorder。App.xaml.cs がホットキー録音用に
     // 保持しているインスタンスとは別物であり (App.xaml.cs は編集禁止のためインスタンスを
     // 共有できない)、Start()/Stop() による実録音には一切使わず、StartMonitoring/StopMonitoring
@@ -98,6 +107,14 @@ public partial class SettingsWindow : Window
             _micTestTimer?.Stop();
             _micTestRecorder.Dispose();
         };
+
+        // モデル一覧取得 (「更新」ボタン) がウィンドウを閉じた後も裏で動き続けないよう、
+        // 閉じた時点で確実にキャンセルする。
+        Closed += (s, e) =>
+        {
+            _modelCatalogCts.Cancel();
+            _modelCatalogCts.Dispose();
+        };
     }
 
     private void LoadSettings()
@@ -119,8 +136,34 @@ public partial class SettingsWindow : Window
         // Groq API キー: 同上
         InitializeApiKeyField(PwdGroqApiKey, TxtGroqApiKeyVisible, LblGroqApiKeyStatus, "GROQ_API_KEY");
 
-        // Geminiモデル
+        // Geminiモデル (文字起こし用)
         TxtGeminiModel.Text = Environment.GetEnvironmentVariable("GEMINI_MODEL") ?? "gemini-2.5-flash";
+
+        // Groq Whisper モデル (文字起こし用)。「更新」ボタンで API から取得するまでは
+        // Ai/ModelCatalog.cs の静的フォールバック一覧を候補として表示する (起動時に勝手に
+        // 通信はしない)。ItemsSource は ComboBox.Text (下で設定する現在値) に影響しない
+        // (IsEditable="True" のため Text は選択とは独立して保持される)。
+        CmbGroqWhisperModel.ItemsSource = ModelCatalog.GroqWhisperFallbackModels;
+        CmbGroqWhisperModel.Text = Environment.GetEnvironmentVariable("GROQ_WHISPER_MODEL") ?? "whisper-large-v3";
+
+        // 整形バックエンド (gemini/nvidia の2択。Core/Settings.cs の AppSettings.RefineProvider、
+        // 大文字小文字は区別しない。未知の値が入っていた場合も CmbProvider と同じ方針で gemini 側にフォールバックする)。
+        CmbRefineProvider.SelectedIndex = settings.RefineProvider?.ToLowerInvariant() switch
+        {
+            "nvidia" => 1,
+            _ => 0
+        };
+
+        // NVIDIA API キー: Gemini/Groq と同じく、設定済みでも実際の値は表示せずステータス表示のみ行う
+        InitializeApiKeyField(PwdNvidiaApiKey, TxtNvidiaApiKeyVisible, LblNvidiaApiKeyStatus, "NVIDIA_API_KEY");
+
+        // Gemini 整形モデル・NVIDIA 整形モデル (いずれも Ai/*RefineProvider.cs 側の既定値と揃える)。
+        // Groq Whisper モデルと同じく、ItemsSource には「更新」を押すまで静的フォールバック
+        // 一覧を入れておく。
+        CmbGeminiRefineModel.ItemsSource = ModelCatalog.GeminiFallbackModels;
+        CmbGeminiRefineModel.Text = Environment.GetEnvironmentVariable("GEMINI_REFINE_MODEL") ?? "gemini-flash-lite-latest";
+        CmbNvidiaRefineModel.ItemsSource = ModelCatalog.NvidiaFallbackModels;
+        CmbNvidiaRefineModel.Text = Environment.GetEnvironmentVariable("NVIDIA_REFINE_MODEL") ?? "nvidia/nemotron-3.5-lightning-30b-a3b";
 
         // マイク一覧
         var mics = AudioRecorder.GetInputDevices();
@@ -287,12 +330,14 @@ public partial class SettingsWindow : Window
         if (File.Exists(effectivePath))
         {
             LblLocalModelStatus.Text = $"モデルは見つかりました。\n{effectivePath}";
-            LblLocalModelStatus.Foreground = new System.Windows.Media.SolidColorBrush(Color.FromRgb(0xA6, 0xE3, 0xA1));
+            // 成功・有効状態の色 (#5A9E6F、設定画面の配色に合わせたもの)。
+            LblLocalModelStatus.Foreground = new System.Windows.Media.SolidColorBrush(Color.FromRgb(0x5A, 0x9E, 0x6F));
         }
         else
         {
             LblLocalModelStatus.Text = $"モデルが見つかりません。ダウンロードが必要です。\n(想定パス: {effectivePath})";
-            LblLocalModelStatus.Foreground = new System.Windows.Media.SolidColorBrush(Color.FromRgb(0xF3, 0x8B, 0xA8));
+            // 警告・破壊的操作の色 (#C85A5A、設定画面の配色に合わせたもの)。
+            LblLocalModelStatus.Foreground = new System.Windows.Media.SolidColorBrush(Color.FromRgb(0xC8, 0x5A, 0x5A));
         }
     }
 
@@ -468,6 +513,170 @@ public partial class SettingsWindow : Window
         {
             _categoryKeywordEntries.Remove(selected);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 「既定に戻す」機能 (プロンプト・辞書)。
+    //
+    // 背景: settings.json に一度でも保存された値は AppSettings のプロパティ既定値より優先され、
+    // 以後ずっと使われ続ける。そのため、アプリ更新でプロンプトの不具合を直しても、既に設定を
+    // 保存したことがあるユーザーには自動的には届かない (Core/Settings.cs の PromptSettings
+    // 冒頭コメント参照)。ここではその復旧手段として、画面上の値だけを既定値に戻すボタンを
+    // 用意する。実際に settings.json へ反映されるのは、他の編集と同じく「保存して適用」
+    // (OnSaveAndApply) を押したときのみであり、このボタン単体で SettingsManager.Instance.Save()
+    // が呼ばれることはない (誤って押しても「キャンセル」で復帰できる)。
+    //
+    // 各 Get/TryGet ヘルパーは PromptSettings/AppSettings の「新規インスタンスのプロパティ既定値」
+    // を読むだけの純粋な処理であり、SettingsManager.Instance (%AppData%\VoiceIn の実ファイル) には
+    // 一切触れない。ApplyDetectedAppCategoryAssignment と同じく internal static であり、
+    // WPF ホスト無しの単体テストから直接呼び出して検証できる。
+    // ------------------------------------------------------------------
+
+    internal static string GetDefaultGeminiTranscribePrompt() => new PromptSettings().GeminiTranscribePrompt;
+
+    internal static string GetDefaultGroqWhisperPrompt() => new PromptSettings().GroqWhisperPrompt;
+
+    internal static string GetDefaultGroqRefineSystemPrompt() => new PromptSettings().GroqRefineSystemPrompt;
+
+    /// <summary>
+    /// 指定したカテゴリキー (DEV/BIZ/DOC/STD 等) に対応する既定のカテゴリ別プロンプトを返す。
+    /// settings.json の手動編集などで追加された、既定値を持たないカスタムカテゴリの場合は
+    /// false を返す (呼び出し側は画面の内容を変更せず、既定値が無い旨を伝えること)。
+    /// </summary>
+    internal static bool TryGetDefaultCategoryPrompt(string categoryKey, out string defaultPrompt)
+    {
+        if (new AppSettings().CategoryPrompts.TryGetValue(categoryKey, out var value))
+        {
+            defaultPrompt = value;
+            return true;
+        }
+
+        defaultPrompt = string.Empty;
+        return false;
+    }
+
+    /// <summary>
+    /// 「文字起こし用プロンプト」(Gemini プロンプト・Groq Whisper プロンプト) を既定値に戻す。
+    /// 押した時点では画面上の TextBox の内容を書き換えるだけで、settings.json への反映は
+    /// 通常どおり「保存して適用」を押したときのみ行われる。取り消せない操作 (現在の入力内容は
+    /// 失われる) のため、既存の履歴全削除 (OnClearDetectedApps) と同じ方針で確認ダイアログを出し、
+    /// 既定ボタンを「いいえ」にする。
+    /// </summary>
+    private void OnResetTranscribePromptsToDefault(object sender, RoutedEventArgs e)
+    {
+        var result = MessageBox.Show(
+            "文字起こし用プロンプト (Gemini プロンプト・Groq Whisper プロンプト) を既定値に戻します。\n" +
+            "現在入力されている内容は失われ、元に戻せません。(この画面を「保存して適用」するまでは設定ファイルへ反映されません)\n\n" +
+            "よろしいですか?",
+            "Voice In",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (result != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        TxtGeminiPrompt.Text = GetDefaultGeminiTranscribePrompt();
+        TxtGroqWhisperPrompt.Text = GetDefaultGroqWhisperPrompt();
+    }
+
+    /// <summary>
+    /// 「整形用プロンプト」を既定値に戻す。方針は OnResetTranscribePromptsToDefault と同じ
+    /// (画面上のみ即時反映、確認ダイアログの既定は「いいえ」)。
+    /// 【欠陥6】かつては「Groq 文章整形プロンプト」と呼んでいたが、整形は Groq から切り離され
+    /// Gemini / NVIDIA が担当するため、表示文言・メッセージともに「整形」という中立的な
+    /// 名称のみを使う (x:Name=TxtGroqRefinePrompt とプロパティ名 GroqRefineSystemPrompt は
+    /// 後方互換のため変更しない)。
+    /// </summary>
+    private void OnResetRefinePromptToDefault(object sender, RoutedEventArgs e)
+    {
+        var result = MessageBox.Show(
+            "整形用プロンプトを既定値に戻します。\n" +
+            "現在入力されている内容は失われ、元に戻せません。(この画面を「保存して適用」するまでは設定ファイルへ反映されません)\n\n" +
+            "よろしいですか?",
+            "Voice In",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (result != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        TxtGroqRefinePrompt.Text = GetDefaultGroqRefineSystemPrompt();
+    }
+
+    /// <summary>
+    /// 現在 CmbCategory で選択中のカテゴリの「カテゴリ別プロンプト」を既定値に戻す。
+    /// DEV/BIZ/DOC/STD など既定値を持つカテゴリのみが対象で、既定値の無いカスタムカテゴリが
+    /// 選択されている場合は画面の内容を変更せず、その旨を伝えるメッセージだけを表示する。
+    /// </summary>
+    private void OnResetCategoryPromptToDefault(object sender, RoutedEventArgs e)
+    {
+        if (_currentCategoryKey is not string categoryKey)
+        {
+            MessageBox.Show("カテゴリを選択してください。", "Voice In", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        if (!TryGetDefaultCategoryPrompt(categoryKey, out string defaultPrompt))
+        {
+            MessageBox.Show(
+                $"「{categoryKey}」には既定のプロンプトが用意されていません。",
+                "Voice In",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        var result = MessageBox.Show(
+            $"「{categoryKey}」のカテゴリ別プロンプトを既定値に戻します。\n" +
+            "現在入力されている内容は失われ、元に戻せません。(この画面を「保存して適用」するまでは設定ファイルへ反映されません)\n\n" +
+            "よろしいですか?",
+            "Voice In",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (result != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        TxtCategoryPrompt.Text = defaultPrompt;
+    }
+
+    /// <summary>
+    /// 辞書 (単語置換ルール) を既定の空の状態に戻す (画面上の一覧をすべて削除する。
+    /// AppSettings.Dictionary の既定値が空の Dictionary であることに対応する)。
+    /// 画面上の _dictEntries を空にするだけであり、settings.json への反映は「保存して適用」
+    /// (OnSaveAndApply) を押したときのみ行われる。
+    /// </summary>
+    private void OnResetDictionaryToDefault(object sender, RoutedEventArgs e)
+    {
+        if (_dictEntries.Count == 0)
+        {
+            return;
+        }
+
+        var result = MessageBox.Show(
+            "辞書 (単語置換ルール) をすべて削除し、既定の状態に戻します。\n" +
+            "現在の内容は失われ、元に戻せません。(この画面を「保存して適用」するまでは設定ファイルへ反映されません)\n\n" +
+            "よろしいですか?",
+            "Voice In",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (result != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        _dictEntries.Clear();
     }
 
     /// <summary>
@@ -683,13 +892,50 @@ public partial class SettingsWindow : Window
             EnvLoader.TryWriteKey("GROQ_API_KEY", groqApiKeyInput);
         }
 
-        // Geminiモデル
+        // Geminiモデル (文字起こし用)
         if (!string.IsNullOrWhiteSpace(TxtGeminiModel.Text))
         {
             string geminiModel = TxtGeminiModel.Text.Trim();
             Environment.SetEnvironmentVariable("GEMINI_MODEL", geminiModel);
             // 次回起動後もモデル設定が保持されるよう .env にも書き戻す。
             EnvLoader.TryWriteKey("GEMINI_MODEL", geminiModel);
+        }
+
+        // Groq Whisper モデル (文字起こし用): 空欄のまま保存された場合は環境変数へ書き込まず、
+        // Ai/GroqProvider.cs 側のコード既定値 (whisper-large-v3) がそのまま使われるようにする
+        // (誤って欄を空にしても壊れないようにするためのガード)。
+        if (TryGetModelEnvValueToWrite(CmbGroqWhisperModel.Text, out string groqWhisperModel))
+        {
+            Environment.SetEnvironmentVariable("GROQ_WHISPER_MODEL", groqWhisperModel);
+            EnvLoader.TryWriteKey("GROQ_WHISPER_MODEL", groqWhisperModel);
+        }
+
+        // 整形バックエンド (gemini/nvidia)。settings.json 側の設定であり、GEMINI_MODEL 等の
+        // 環境変数とは異なり、この下の SettingsManager.Instance.Save() で永続化される。
+        string selectedRefineProvider = (CmbRefineProvider.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "gemini";
+        settings.RefineProvider = selectedRefineProvider;
+
+        // NVIDIA API キー: Gemini/Groq API キーと全く同じガード。空欄のまま保存された場合は
+        // 既存のキーを一切変更しない (マスクされた欄に何も入力しなかっただけでキーが消えてしまう事故を防ぐため)。
+        string nvidiaApiKeyInput = ReadApiKeyInput(PwdNvidiaApiKey, TxtNvidiaApiKeyVisible);
+        if (!string.IsNullOrEmpty(nvidiaApiKeyInput))
+        {
+            Environment.SetEnvironmentVariable("NVIDIA_API_KEY", nvidiaApiKeyInput);
+            EnvLoader.TryWriteKey("NVIDIA_API_KEY", nvidiaApiKeyInput);
+        }
+
+        // Gemini 整形モデル・NVIDIA 整形モデル: Groq Whisper モデルと同じガード
+        // (空欄のまま保存された場合は書き込まず、Ai/*RefineProvider.cs 側の既定値を使わせる)。
+        if (TryGetModelEnvValueToWrite(CmbGeminiRefineModel.Text, out string geminiRefineModel))
+        {
+            Environment.SetEnvironmentVariable("GEMINI_REFINE_MODEL", geminiRefineModel);
+            EnvLoader.TryWriteKey("GEMINI_REFINE_MODEL", geminiRefineModel);
+        }
+
+        if (TryGetModelEnvValueToWrite(CmbNvidiaRefineModel.Text, out string nvidiaRefineModel))
+        {
+            Environment.SetEnvironmentVariable("NVIDIA_REFINE_MODEL", nvidiaRefineModel);
+            EnvLoader.TryWriteKey("NVIDIA_REFINE_MODEL", nvidiaRefineModel);
         }
 
         // マイクデバイス
@@ -831,7 +1077,7 @@ public partial class SettingsWindow : Window
         }
 
         PbMicTestLevel.Value = 0;
-        BtnToggleMicTest.Content = "⏹ マイクテスト停止";
+        BtnToggleMicTest.Content = "マイクテスト停止";
 
         // Tick を二重登録しないよう、既存のタイマーがあれば使い回す (無ければ生成する)。
         if (_micTestTimer == null)
@@ -852,7 +1098,7 @@ public partial class SettingsWindow : Window
         _micTestTimer?.Stop();
         _micTestRecorder.StopMonitoring();
         PbMicTestLevel.Value = 0;
-        BtnToggleMicTest.Content = "▶ マイクテスト開始";
+        BtnToggleMicTest.Content = "マイクテスト開始";
     }
 
     /// <summary>
@@ -946,7 +1192,7 @@ public partial class SettingsWindow : Window
         string? existing = Environment.GetEnvironmentVariable(envKey);
         status.Text = string.IsNullOrEmpty(existing)
             ? "未設定"
-            : "設定済み (空欄のまま保存すると変更されません。変更する場合のみ入力してください)";
+            : "設定済み (空欄のまま保存すれば変更されません)";
     }
 
     /// <summary>
@@ -967,6 +1213,35 @@ public partial class SettingsWindow : Window
     private void OnToggleGroqApiKeyVisibility(object sender, RoutedEventArgs e)
     {
         ToggleApiKeyVisibility(PwdGroqApiKey, TxtGroqApiKeyVisible);
+    }
+
+    private void OnToggleNvidiaApiKeyVisibility(object sender, RoutedEventArgs e)
+    {
+        ToggleApiKeyVisibility(PwdNvidiaApiKey, TxtNvidiaApiKeyVisible);
+    }
+
+    /// <summary>
+    /// モデル名入力欄 (ComboBox.Text) の内容が環境変数へ書き込むべき値かどうかを判定する
+    /// 純粋関数。空文字列・null・空白のみの場合は false を返し、value には空文字列を設定する
+    /// (呼び出し側は環境変数への書き込みを一切行わないこと。Ai/GroqProvider.cs や
+    /// Ai/*RefineProvider.cs 側のコード既定値 (whisper-large-v3 等) がそのまま使われる)。
+    /// 前後の空白を除去した値は value で返し、呼び出し側はそのまま
+    /// Environment.SetEnvironmentVariable / EnvLoader.TryWriteKey へ渡せる。
+    ///
+    /// SettingsManager.Instance / EnvLoader.TryWriteKey など副作用のある処理は一切行わないため、
+    /// SettingsWindowResetToDefaultTests.cs 等と同じく、WPF ホスト無しの単体テストから
+    /// internal static なメソッドとして直接呼び出して検証できる。
+    /// </summary>
+    internal static bool TryGetModelEnvValueToWrite(string? inputText, out string value)
+    {
+        if (string.IsNullOrWhiteSpace(inputText))
+        {
+            value = string.Empty;
+            return false;
+        }
+
+        value = inputText.Trim();
+        return true;
     }
 
     /// <summary>
@@ -992,4 +1267,244 @@ public partial class SettingsWindow : Window
             txt.Visibility = Visibility.Visible;
         }
     }
+
+    // ============================================================
+    // モデル一覧「更新」ボタン (Ai/ModelCatalog.cs)。
+    // 3つの ComboBox (Groq Whisper / Gemini 整形 / NVIDIA 整形) は挙動が共通のため、
+    // RefreshModelListAsync に処理をまとめ、各ハンドラは呼び出すだけにする。
+    // ============================================================
+
+    /// <summary>
+    /// async void だが UI イベントハンドラであり (OnDownloadModel と同じ、WPF での唯一の
+    /// 正当な async void の用途)、例外は RefreshModelListAsync 内で全て catch してステータス
+    /// 表示にとどめ、外へは決して漏らさない。
+    /// </summary>
+    private async void OnRefreshGroqWhisperModel(object sender, RoutedEventArgs e)
+    {
+        string apiKey = GetEffectiveApiKeyForFetch(PwdGroqApiKey, TxtGroqApiKeyVisible, "GROQ_API_KEY");
+        await RefreshModelListAsync(
+            CmbGroqWhisperModel,
+            BtnRefreshGroqWhisperModel,
+            LblGroqWhisperModelStatus,
+            ct => ModelCatalog.FetchGroqWhisperModelsAsync(apiKey, ct));
+    }
+
+    private async void OnRefreshGeminiRefineModel(object sender, RoutedEventArgs e)
+    {
+        // 整形用 Gemini モデルも、文字起こしタブの Gemini API キーと同じキーを使う
+        // (Ai/GeminiRefineProvider.cs が GEMINI_API_KEY を共用するのと同じ理由。
+        // 整形タブのヘルパーテキストにも明記済み)。
+        string apiKey = GetEffectiveApiKeyForFetch(PwdGeminiApiKey, TxtGeminiApiKeyVisible, "GEMINI_API_KEY");
+        await RefreshModelListAsync(
+            CmbGeminiRefineModel,
+            BtnRefreshGeminiRefineModel,
+            LblGeminiRefineModelStatus,
+            ct => ModelCatalog.FetchGeminiModelsAsync(apiKey, ct));
+    }
+
+    private async void OnRefreshNvidiaRefineModel(object sender, RoutedEventArgs e)
+    {
+        string apiKey = GetEffectiveApiKeyForFetch(PwdNvidiaApiKey, TxtNvidiaApiKeyVisible, "NVIDIA_API_KEY");
+        await RefreshModelListAsync(
+            CmbNvidiaRefineModel,
+            BtnRefreshNvidiaRefineModel,
+            LblNvidiaRefineModelStatus,
+            ct => ModelCatalog.FetchNvidiaModelsAsync(apiKey, ct));
+    }
+
+    /// <summary>
+    /// モデル一覧取得に使う API キーを決定する。保存処理 (ReadApiKeyInput) と異なり、
+    /// 「空欄なら変更しない」ではなく「空欄なら環境変数の現在値にフォールバック」する
+    /// (取得の実行可否を決めるための値であり、保存されるわけではないため)。
+    /// 要件: 「取得に使うAPIキーは設定画面上で今入力されている値を優先し、空なら環境変数を使う」。
+    /// </summary>
+    private static string GetEffectiveApiKeyForFetch(PasswordBox pwd, System.Windows.Controls.TextBox txt, string envKey)
+    {
+        string input = ReadApiKeyInput(pwd, txt);
+        return !string.IsNullOrEmpty(input) ? input : (Environment.GetEnvironmentVariable(envKey) ?? string.Empty);
+    }
+
+    /// <summary>
+    /// RefreshModelListCoreAsync (判定・状態遷移の中核ロジック) が必要とする操作のみを
+    /// 抽象化した internal インターフェース。ComboBox.Text の読み書き・ItemsSource の差し替え・
+    /// ボタンの有効/無効・ステータス表示の文言と表示/非表示のみを持ち、判定ロジックは
+    /// 一切含まない薄い抽象化である。
+    ///
+    /// これにより RefreshModelListCoreAsync 自体は WPF に一切依存しない純粋な非同期処理となり、
+    /// SettingsWindow をテストホスト上でインスタンス化せずに (フェイク実装を渡すだけで)
+    /// 単体テストできる (tests/VoiceIn.Tests/Ui/SettingsWindowRefreshModelListCoreTests.cs 参照)。
+    /// </summary>
+    internal interface IModelListView
+    {
+        /// <summary>ComboBox.Text 相当 (IsEditable="True" のユーザー入力/選択値)。</summary>
+        string Text { get; set; }
+
+        /// <summary>ComboBox.ItemsSource 相当。取得成功時にのみ差し替える (書き込み専用)。</summary>
+        IReadOnlyList<string> Items { set; }
+
+        /// <summary>「更新」ボタンの Button.IsEnabled 相当 (書き込み専用)。</summary>
+        bool ButtonEnabled { set; }
+
+        /// <summary>ステータス表示 (TextBlock) の Text 相当 (書き込み専用)。</summary>
+        string StatusText { set; }
+
+        /// <summary>ステータス表示 (TextBlock) の Visibility 相当 (書き込み専用)。</summary>
+        bool StatusVisible { set; }
+    }
+
+    /// <summary>
+    /// IModelListView を、実際の WPF コントロール (ComboBox / Button / TextBlock) にマッピング
+    /// するだけの薄いアダプタ。判定・状態遷移のロジックは一切持たない
+    /// (RefreshModelListCoreAsync 側に一本化されている)。
+    /// </summary>
+    private sealed class ComboBoxModelListView : IModelListView
+    {
+        private readonly System.Windows.Controls.ComboBox _combo;
+        private readonly System.Windows.Controls.Button _button;
+        private readonly TextBlock _status;
+
+        public ComboBoxModelListView(System.Windows.Controls.ComboBox combo, System.Windows.Controls.Button button, TextBlock status)
+        {
+            _combo = combo;
+            _button = button;
+            _status = status;
+        }
+
+        public string Text
+        {
+            get => _combo.Text;
+            set => _combo.Text = value;
+        }
+
+        public IReadOnlyList<string> Items
+        {
+            set => _combo.ItemsSource = value;
+        }
+
+        public bool ButtonEnabled
+        {
+            set => _button.IsEnabled = value;
+        }
+
+        public string StatusText
+        {
+            set => _status.Text = value;
+        }
+
+        public bool StatusVisible
+        {
+            set => _status.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    /// <summary>
+    /// モデル一覧「更新」ボタンの共通処理。判定・状態遷移の実体は RefreshModelListCoreAsync に
+    /// 一本化されており、このメソッドは実際の WPF コントロールを IModelListView でラップして
+    /// 渡すだけの薄いアダプタである。
+    ///
+    /// 【重要】このメソッドの private シグネチャ (ComboBox, Button, TextBlock,
+    /// Func&lt;CancellationToken, Task&lt;IReadOnlyList&lt;string&gt;&gt;&gt;) は変更しないこと
+    /// (3つの OnRefreshXxx ハンドラから呼ばれているほか、テストハーネスがリフレクションで
+    /// 直接呼び出している)。
+    /// </summary>
+    private async Task RefreshModelListAsync(
+        System.Windows.Controls.ComboBox combo,
+        System.Windows.Controls.Button button,
+        TextBlock status,
+        Func<CancellationToken, Task<IReadOnlyList<string>>> fetchAsync)
+    {
+        await RefreshModelListCoreAsync(new ComboBoxModelListView(combo, button, status), fetchAsync, _modelCatalogCts.Token);
+    }
+
+    /// <summary>
+    /// モデル一覧「更新」ボタンの判定・状態遷移を担う中核処理 (WPF にも SettingsManager にも
+    /// 依存しない純粋な非同期処理)。取得中は view.ButtonEnabled を false にして二重押しを防ぎ、
+    /// 成功時は view.Items を差し替える。view.Text (ユーザーが選択/入力済みの値) は Items の
+    /// 差し替え前後で明示的に退避・復元することで、一覧に無い値でも消えないことを保証する。
+    ///
+    /// 【欠陥修正】previousText は以前 await の前 (関数冒頭) で退避していたため、取得中に
+    /// ユーザーが Text を打ち替えても、成功時・失敗時のどちらでもその入力が巻き戻ってしまって
+    /// いた (実測済み)。退避は await の後、Items を差し替える直前に行う。失敗時は Items 自体に
+    /// 触れないため、view.Text にも一切触れない (触れなければ、取得中にユーザーが入力した内容が
+    /// そのまま残る)。
+    ///
+    /// windowClosing はウィンドウを閉じたことを示すキャンセルトークン (呼び出し元では
+    /// _modelCatalogCts.Token) であり、fetchAsync にもそのまま渡す。
+    ///
+    /// 失敗してもモーダルは出さず、既存の設定保存フロー (OnSaveAndApply) には一切影響しない。
+    /// view.StatusText (HelperTextStyle の TextBlock 相当) に1行で結果を表示するのみに留める。
+    ///
+    /// internal (AssemblyInfo.cs の InternalsVisibleTo により VoiceIn.Tests から参照可能) にして、
+    /// WPF ホスト無しの単体テストからフェイクの IModelListView を渡して直接検証できるようにする
+    /// (SettingsWindow は WPF の Window でありテストホスト上でインスタンス化できないため、
+    /// SettingsWindowResetToDefaultTests.cs 等と同じ方針)。
+    /// </summary>
+    internal static async Task RefreshModelListCoreAsync(
+        IModelListView view,
+        Func<CancellationToken, Task<IReadOnlyList<string>>> fetchAsync,
+        CancellationToken windowClosing)
+    {
+        view.ButtonEnabled = false;
+        view.StatusVisible = true;
+        view.StatusText = "取得中...";
+
+        try
+        {
+            IReadOnlyList<string> models = await fetchAsync(windowClosing);
+
+            // view.Text の退避は await の後、Items を差し替える直前に行う
+            // (await 中にユーザーが入力した内容を巻き戻さないため)。
+            string previousText = view.Text;
+            view.Items = models;
+            // IsEditable="True" の ComboBox は ItemsSource の差し替えだけで Text を書き換える
+            // ことは無いはずだが、「一覧に無い値でも消してはならない」という要件を確実に
+            // 満たすため、念のため明示的に復元する。
+            view.Text = previousText;
+            view.StatusText = $"{models.Count}件取得しました。";
+        }
+        catch (OperationCanceledException) when (windowClosing.IsCancellationRequested)
+        {
+            // ウィンドウを閉じたことによる本物のキャンセルのときのみ、ここで握り潰す。
+            // 閉じた後の Window に対する UI 更新は意味が無い (例外にもならないが、
+            // 無駄な作業を避けるためここで打ち切る)。
+            //
+            // 【欠陥修正】以前は when 句が無く、HttpClient のタイムアウト
+            // (TaskCanceledException は OperationCanceledException の派生) までここで
+            // 握り潰されてしまい、status が「取得中...」のまま固まっていた (実測済み)。
+            // windowClosing.IsCancellationRequested が false のとき (=ウィンドウを
+            // 閉じたことによる本物のキャンセルではないとき) はこの catch にマッチさせず、
+            // 下の catch (Exception) に流してタイムアウトとして表示させる。
+        }
+        catch (Exception ex)
+        {
+            // view.Items には触れていないため、view.Text も一切変更しない
+            // (取得中にユーザーが入力した内容をそのまま保持するため)。
+            view.StatusText = $"取得失敗: {SummarizeFetchError(ex)}";
+        }
+        finally
+        {
+            if (!windowClosing.IsCancellationRequested)
+            {
+                view.ButtonEnabled = true;
+            }
+        }
+    }
+
+    /// <summary>
+    /// モデル一覧取得の失敗をステータス表示 (1行) 向けに要約する。API レスポンス本文や
+    /// URL をそのまま出さないよう、Ai/ModelCatalog.cs 側で既に切り詰め・サニタイズ済みの
+    /// メッセージであっても、ここでは種別ごとの短い日本語文言に置き換える
+    /// (InvalidOperationException のみ、APIキー未設定などの分かりやすい文言のため
+    /// そのまま表示する)。
+    /// internal (AssemblyInfo.cs の InternalsVisibleTo により VoiceIn.Tests から参照可能) にして、
+    /// 各分岐を単体テストで固定する。
+    /// </summary>
+    internal static string SummarizeFetchError(Exception ex) => ex switch
+    {
+        InvalidOperationException => ex.Message,
+        HttpRequestException => "通信エラー",
+        TaskCanceledException => "タイムアウトしました",
+        JsonException => "応答の解析に失敗しました",
+        _ => "取得できませんでした",
+    };
 }

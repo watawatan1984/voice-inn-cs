@@ -33,7 +33,7 @@ graph TB
             AiFactory[AiProviderFactory]
             IAi[<<interface>> IAiProvider]
             Gemini[GeminiProvider <br/> REST generateContent]
-            Groq[GroqProvider <br/> Whisper + LLaMA 3.3]
+            Groq[GroqProvider <br/> Whisper + LLM]
         end
 
         subgraph ContextModule ["コンテキスト & テキスト"]
@@ -162,8 +162,12 @@ sequenceDiagram
   - HTTP `POST` により `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` を呼び出し。
   - WAV 音声データを Base64 文字列化し、リクエスト JSON の `inline_data` として埋め込み。
 - **`GroqProvider`**:
-  - 第1段階: `https://api.groq.com/openai/v1/audio/transcriptions` (MultipartFormData / `whisper-large-v3`) で素早く高精度な生テキストを取得。
-  - 第2段階: `https://api.groq.com/openai/v1/chat/completions` (JSON / `llama-3.3-70b-versatile`) でシステムプロンプトに従った高度な文章整形を実施。
+  - 第1段階: `https://api.groq.com/openai/v1/audio/transcriptions` (MultipartFormData / 既定 `whisper-large-v3`、`GROQ_WHISPER_MODEL` で変更可) で素早く高精度な生テキストを取得。Groq が担当するのはこの文字起こしのみ。
+  - 第2段階: `RefineProviderFactory` が設定 `refine_provider` に従って整形バックエンド (`IRefineProvider`) を選び、システムプロンプトに従って文章を整形する。
+    - `GeminiRefineProvider`: `generateContent` (既定 `gemini-flash-lite-latest`、`GEMINI_REFINE_MODEL` で変更可)。
+    - `NvidiaRefineProvider`: `https://integrate.api.nvidia.com/v1/chat/completions` (既定 `nvidia/nemotron-3.5-lightning-30b-a3b`、`NVIDIA_REFINE_MODEL` で変更可)。思考モード (`enable_thinking`) は常に無効。
+  - 整形は付加価値の扱い。整形バックエンドが例外を投げた場合も空の応答を返した場合も、第1段階の生テキストを採用し、発話を失わない。
+- **`ModelCatalog`**: 設定画面の「更新」ボタンから、各社のモデル一覧 API (Gemini ListModels / Groq・NVIDIA の `/v1/models`) を呼んで候補を取得する。整形に使えない系統 (埋め込み・安全判定・画像生成など) は名前で除外する。API キーは URL に載せず、ヘッダで送る。
 
 ---
 

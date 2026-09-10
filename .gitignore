@@ -17,3 +17,18 @@ history.json
 settings.json
 temp_*.wav
 *.tmp
+
+## Installer build output (dotnet publish + Inno Setup, see installer/build.ps1)
+dist/
+
+## AI Code Intelligence & Knowledge Graphs (regenerate locally, do not commit)
+.code-review-graph/
+*.db
+.graphify/
+graphify-out/
+graph.html
+graph.json
+GRAPH_REPORT.md
+obsidian/
+wiki/
+.serena/
