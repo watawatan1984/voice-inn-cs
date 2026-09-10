@@ -67,7 +67,7 @@ flowchart TD
 | **FR-003** | 音声入力 | 最大録音時間制限 | 設定された最大録音時間（1〜300秒、デフォルト60秒）を超過した場合、自動で録音を停止し処理へ移行する。 |
 | **FR-004** | 音声入力 | VAD (無音判定) | 最小録音時間（デフォルト0.2秒）未満、または RMS < 0.005 かつ Peak < 0.02 の場合は無音とみなし、API呼び出しを行わずに処理をキャンセルする。 |
 | **FR-005** | AI連携 | Gemini プロバイダ | Google Gemini API (`generateContent`) を使用。WAVをBase64インライン化して送信し、モデル指定（gemini-2.5-flash等）に対応。 |
-| **FR-006** | AI連携 | Groq プロバイダ | Groq Whisper API (既定 `whisper-large-v3`) で高精度文字起こしを行い、LLM (既定 `openai/gpt-oss-120b`) で文章整形を行う2段階パイプライン。モデルは `GROQ_WHISPER_MODEL` / `GROQ_REFINE_MODEL` で変更可能。 |
+| **FR-006** | AI連携 | Groq プロバイダ | Groq Whisper API (既定 `whisper-large-v3`、`GROQ_WHISPER_MODEL` で変更可) による文字起こし専用。文章整形は Groq では行わず、設定 `refine_provider` で選んだ整形バックエンド (Gemini: 既定 `gemini-flash-lite-latest` / `GEMINI_REFINE_MODEL`、NVIDIA: 既定 `nvidia/nemotron-3.5-lightning-30b-a3b` / `NVIDIA_REFINE_MODEL`) が担当する。整形が失敗した場合や空の応答を返した場合は、文字起こし結果をそのまま採用する (発話を失わない)。 |
 | **FR-007** | AI連携 | コンテキスト認識 | アクティブウィンドウのプロセス・タイトルから `DEV`, `BIZ`, `DOC`, `STD` を判定し、それぞれの文脈に最適化されたプロンプトを付与する。 |
 | **FR-008** | テキスト処理 | 辞書置換 | ユーザーが登録した「置換前 → 置換後」の単語ペアに基づき、AI整形後のテキストを確定前に強制置換する。 |
 | **FR-009** | テキスト処理 | 自動貼り付け (Auto Paste) | 録音開始時のアクティブウィンドウハンドル (HWND) を記憶し、クリップボード格納後に修飾キーを解除して `Ctrl + V` を注入する。 |

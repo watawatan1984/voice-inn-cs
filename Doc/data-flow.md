@@ -134,10 +134,14 @@ flowchart TD
 
         ProviderSelect -->|gemini| GeminiCall["Gemini REST API <br/> (Base64 Inline WAV + Prompt)"]
         ProviderSelect -->|groq| GroqWhisper["Groq Whisper API <br/> (wav -> Raw Text)"]
-        GroqWhisper --> GroqRefine["Groq LLM API <br/> (Raw Text + System Prompt)"]
+        GroqWhisper --> RefineSelect{"整形バックエンド <br/> (settings.json の refine_provider)"}
+        RefineSelect -->|gemini| GeminiRefine["Gemini REST API <br/> (Raw Text + System Prompt)"]
+        RefineSelect -->|nvidia| NvidiaRefine["NVIDIA NIM API <br/> (Raw Text + System Prompt)"]
 
         GeminiCall --> RawResult[整形済みテキスト]
-        GroqRefine --> RawResult
+        GeminiRefine --> RawResult
+        NvidiaRefine --> RawResult
+        RefineSelect -.->|整形の失敗・空応答時は生テキスト| RawResult
     end
 
     subgraph PostProcess ["4. 後処理 & 貼り付け"]
