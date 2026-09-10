@@ -52,6 +52,29 @@ public class AiProviderFactoryTests
         Assert.IsType<GeminiProvider>(provider);
     }
 
+    [Fact]
+    public void CreateProvider_Local_ReturnsLocalProvider()
+    {
+        IAiProvider provider = AiProviderFactory.CreateProvider("local");
+
+        Assert.IsType<LocalProvider>(provider);
+        Assert.Equal("local", provider.ProviderName);
+    }
+
+    [Theory]
+    [InlineData("LOCAL")]
+    [InlineData("Local")]
+    [InlineData("lOcAl")]
+    public void CreateProvider_LocalNameIsCaseInsensitive(string providerName)
+    {
+        // LocalProvider の生成自体は SettingsManager.Instance / Logger のいずれにも触れない
+        // (モデルのロードは TranscribeAsync が実際に呼ばれたときのみ発生する) ため、
+        // Groq/Gemini と同様にここで安全にインスタンス化できる。
+        IAiProvider provider = AiProviderFactory.CreateProvider(providerName);
+
+        Assert.IsType<LocalProvider>(provider);
+    }
+
     [Theory]
     [InlineData("unknown-provider")]
     [InlineData("chatgpt")]

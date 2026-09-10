@@ -1,6 +1,8 @@
 using System;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
+using VoiceIn.Ai;
 using VoiceIn.Audio;
 using VoiceIn.Core;
 
@@ -35,16 +37,39 @@ public partial class SetupWindow : Window
     // それより前にイベントハンドラが呼ばれても何もしないようにするガード。
     private bool _initialized;
 
+    // _pages の中で「マイクデバイス」ページ (PageDevice) が何番目かを覚えておく。
+    // ShowPage() がこのページから離れるときにマイクテストを自動的に止めるために使う。
+    private readonly int _devicePageIndex;
+
+    // マイクテスト (レベルメーター) 専用の AudioRecorder。Ui/SettingsWindow.xaml.cs と同じ方針:
+    // App.xaml.cs がホットキー録音用に保持するインスタンスとは別物であり、Start()/Stop() による
+    // 実録音には一切使わず、StartMonitoring/StopMonitoring のみを呼ぶ。
+    private readonly AudioRecorder _micTestRecorder = new();
+
+    // マイクテストのバー表示更新用タイマー。NAudio のキャプチャコールバック (別スレッド) から
+    // 直接 UI を更新しないよう、UI スレッドの DispatcherTimer でポーリングする。
+    private DispatcherTimer? _micTestTimer;
+
     public SetupWindow()
     {
         InitializeComponent();
 
         _pages = [PageWelcome, PageProvider, PageDevice, PageControls, PageFinish];
+        _devicePageIndex = Array.IndexOf(_pages, PageDevice);
         _initialized = true;
 
         LoadDefaults();
         UpdateProviderPanels();
         ShowPage(0);
+
+        // マイクが開きっぱなしにならないよう、ウィンドウを閉じたら必ずマイクテストを止める。
+        // _micTestRecorder.Dispose() は内部で StopMonitoring() を呼ぶため、ページ移動時の
+        // 停止処理 (ShowPage 参照) を経ずに閉じられた場合でも確実にデバイスが解放される。
+        Closed += (s, e) =>
+        {
+            _micTestTimer?.Stop();
+            _micTestRecorder.Dispose();
+        };
     }
 
     private void LoadDefaults()
@@ -52,10 +77,12 @@ public partial class SetupWindow : Window
         var settings = SettingsManager.Instance.Settings;
 
         // プロバイダ (未設定時は SettingsManager.CurrentProvider の既定値である gemini を選択)
-        string curProvider = SettingsManager.Instance.CurrentProvider;
-        bool groqSelected = curProvider.ToLowerInvariant() == "groq";
-        RbGemini.IsChecked = !groqSelected;
+        string curProvider = SettingsManager.Instance.CurrentProvider.ToLowerInvariant();
+        bool groqSelected = curProvider == "groq";
+        bool localSelected = curProvider == "local";
+        RbGemini.IsChecked = !groqSelected && !localSelected;
         RbGroq.IsChecked = groqSelected;
+        RbLocal.IsChecked = localSelected;
 
         // API キー: 設定済みでも実際の値は表示せず、ステータス表示のみ行う (SettingsWindow と同じ方針)
         InitializeApiKeyField(PwdGeminiApiKey, TxtGeminiApiKeyVisible, LblGeminiApiKeyStatus, "GEMINI_API_KEY");
@@ -116,11 +143,40 @@ public partial class SetupWindow : Window
         UpdateNavState();
     }
 
+    /// <summary>現在ラジオボタンで選択されているプロバイダ名 ("gemini"/"groq"/"local") を返す。</summary>
+    private string GetSelectedProvider()
+    {
+        if (RbGroq.IsChecked == true) return "groq";
+        if (RbLocal.IsChecked == true) return "local";
+        return "gemini";
+    }
+
     private void UpdateProviderPanels()
     {
-        bool geminiSelected = RbGemini.IsChecked == true;
-        PanelGeminiFields.Visibility = geminiSelected ? Visibility.Visible : Visibility.Collapsed;
-        PanelGroqFields.Visibility = geminiSelected ? Visibility.Collapsed : Visibility.Visible;
+        string provider = GetSelectedProvider();
+        PanelGeminiFields.Visibility = provider == "gemini" ? Visibility.Visible : Visibility.Collapsed;
+        PanelGroqFields.Visibility = provider == "groq" ? Visibility.Visible : Visibility.Collapsed;
+        PanelLocalFields.Visibility = provider == "local" ? Visibility.Visible : Visibility.Collapsed;
+
+        if (provider == "local")
+        {
+            // モデルのダウンロード状態はここで初めて必要になるため、表示するたびに反映する
+            // (ネットワーク I/O は行わない。ファイル存在確認のみ)。
+            RefreshLocalModelStatusText();
+        }
+    }
+
+    /// <summary>
+    /// ローカル (オフライン) 選択時に、現在のモデルサイズ設定がダウンロード済みかどうかを案内する。
+    /// ここではダウンロードそのものは行わせず (任意項目)、未取得なら設定画面へ誘導するに留める。
+    /// ModelDownloader.ModelExists はファイル存在確認のみでネットワーク I/O を行わない。
+    /// </summary>
+    private void RefreshLocalModelStatusText()
+    {
+        string modelSize = SettingsManager.Instance.Settings.Local.ModelSize;
+        LblLocalModelStatus.Text = ModelDownloader.ModelExists(modelSize)
+            ? $"現在のモデル設定 ({modelSize}) は既にダウンロード済みです。"
+            : $"現在のモデル設定 ({modelSize}) はまだダウンロードされていません。";
     }
 
     private void OnGeminiApiKeyPasswordChanged(object sender, RoutedEventArgs e) => OnApiKeyFieldChanged();
@@ -183,7 +239,14 @@ public partial class SetupWindow : Window
     /// </summary>
     private bool HasUsableApiKey()
     {
-        bool geminiSelected = RbGemini.IsChecked == true;
+        string provider = GetSelectedProvider();
+        if (provider == "local")
+        {
+            // ローカルは API キーが不要なため、常に「次へ」を許可する。
+            return true;
+        }
+
+        bool geminiSelected = provider == "gemini";
         string envKey = geminiSelected ? "GEMINI_API_KEY" : "GROQ_API_KEY";
         string input = geminiSelected
             ? ReadApiKeyInput(PwdGeminiApiKey, TxtGeminiApiKeyVisible)
@@ -198,6 +261,14 @@ public partial class SetupWindow : Window
 
     private void ShowPage(int index)
     {
+        // マイクデバイスのページから他のページへ移動するときは、開いたままのマイクテストを
+        // 必ず止める (「ページを離れたら止める」要件。ウィンドウを閉じたときの停止は
+        // コンストラクタで登録した Closed ハンドラが別途担う)。
+        if (_currentPage == _devicePageIndex && index != _devicePageIndex)
+        {
+            StopMicTest();
+        }
+
         _currentPage = index;
         for (int i = 0; i < _pages.Length; i++)
         {
@@ -233,8 +304,12 @@ public partial class SetupWindow : Window
 
     private void UpdateSummary()
     {
-        bool geminiSelected = RbGemini.IsChecked == true;
-        string providerLabel = geminiSelected ? "Gemini" : "Groq";
+        string providerLabel = GetSelectedProvider() switch
+        {
+            "groq" => "Groq",
+            "local" => "ローカル (オフライン)",
+            _ => "Gemini"
+        };
 
         string micLabel = CmbMicDevice.SelectedIndex <= 0
             ? "既定のデバイス"
@@ -280,13 +355,97 @@ public partial class SetupWindow : Window
         Close();
     }
 
+    /// <summary>
+    /// マイクテストのトグルボタン。モニタリング中でなければ開始し、モニタリング中であれば停止する
+    /// (Ui/SettingsWindow.OnToggleMicTest と同じ方針)。
+    /// </summary>
+    private void OnToggleMicTest(object sender, RoutedEventArgs e)
+    {
+        if (_micTestRecorder.IsMonitoring)
+        {
+            StopMicTest();
+        }
+        else
+        {
+            StartMicTest();
+        }
+    }
+
+    /// <summary>
+    /// 現在 CmbMicDevice で選択されているデバイスに対してマイクテストを開始する。
+    /// デバイスが他アプリで使用中・無効化されている場合は AudioRecorder.StartMonitoring が
+    /// 例外を投げるので、ここで catch して「何が起きたか分かるメッセージ」を表示する。
+    /// </summary>
+    private void StartMicTest()
+    {
+        int? deviceIndex = CmbMicDevice.SelectedIndex <= 0 ? null : CmbMicDevice.SelectedIndex - 1;
+
+        try
+        {
+            _micTestRecorder.StartMonitoring(deviceIndex);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"マイクテストを開始できませんでした。デバイスが他のアプリで使用中か、無効になっている可能性があります。\n\n{ex.Message}",
+                "Voice In - マイクテスト",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
+
+        PbMicTestLevel.Value = 0;
+        BtnToggleMicTest.Content = "⏹ マイクテスト停止";
+
+        if (_micTestTimer == null)
+        {
+            _micTestTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            _micTestTimer.Tick += OnMicTestTimerTick;
+        }
+        _micTestTimer.Start();
+    }
+
+    /// <summary>
+    /// マイクテストを停止する。トグルボタン・ページ移動時・ウィンドウを閉じたときの
+    /// いずれからも呼ばれる。モニタリングしていない状態で呼んでも安全。
+    /// </summary>
+    private void StopMicTest()
+    {
+        _micTestTimer?.Stop();
+        _micTestRecorder.StopMonitoring();
+        PbMicTestLevel.Value = 0;
+        BtnToggleMicTest.Content = "▶ マイクテスト開始";
+    }
+
+    /// <summary>
+    /// マイクテストのバー表示を更新するタイマーコールバック (Ui/SettingsWindow と同じ方針)。
+    /// DispatcherTimer の Tick は UI スレッド上で実行されるため、NAudio のキャプチャコールバック
+    /// (別スレッド) から直接 UI を更新することにはならない。
+    /// </summary>
+    private void OnMicTestTimerTick(object? sender, EventArgs e)
+    {
+        double rms = _micTestRecorder.CurrentMonitoringRms;
+        PbMicTestLevel.Value = AudioSampleProcessor.RmsToBarValue(rms);
+    }
+
+    /// <summary>
+    /// マイク入力デバイスの選択が変わったときに呼ばれる。マイクテスト中に古いデバイスを
+    /// 監視し続けないよう、実行中であれば一旦停止する。
+    /// </summary>
+    private void OnMicDeviceSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_micTestRecorder.IsMonitoring)
+        {
+            StopMicTest();
+        }
+    }
+
     private void SaveAndFinish()
     {
         var settings = SettingsManager.Instance.Settings;
 
         // プロバイダ (setter が .env へも書き戻す)
-        bool geminiSelected = RbGemini.IsChecked == true;
-        SettingsManager.Instance.CurrentProvider = geminiSelected ? "gemini" : "groq";
+        SettingsManager.Instance.CurrentProvider = GetSelectedProvider();
 
         // API キー: 空欄のまま完了した場合は既存のキーを一切変更しない。
         // 実際に新しい値が入力されたときのみ、環境変数への即時反映と .env への書き戻しを行う

@@ -77,6 +77,73 @@ public class PromptSettings
         """;
 }
 
+/// <summary>
+/// ローカル音声認識 (Whisper.net / whisper.cpp) の設定。
+/// 移植元 Python 版 (src/ai/providers/local.py, faster-whisper 使用) の
+/// local.model_size / local.device / local.compute_type に相当する設定を持つが、
+/// C# 版では Whisper.net の GPU 自動フォールバック機構を使うため device/compute_type は
+/// 持たず、代わりに UseGpu (bool) と ModelPath (明示パス) を持つ。
+/// </summary>
+public class LocalSettings
+{
+    /// <summary>
+    /// GGML モデルのサイズ。
+    /// 既定値を移植元と同じ "large-v3" ではなく "small" にしている理由:
+    /// large-v3 は約 3GB あり初回ダウンロードが重く、対象環境 (VRAM 4GB) では厳しい。
+    /// 押して話すツールとして待ち時間が実用的な範囲に収まる "small" (約 500MB) を既定とし、
+    /// 精度を優先したいユーザーは設定で large-v3 等へ変更できるようにする。
+    /// </summary>
+    [JsonPropertyName("model_size")]
+    public string ModelSize { get; set; } = "small";
+
+    /// <summary>CUDA を試みるか。false の場合は CPU 固定で動作する。</summary>
+    [JsonPropertyName("use_gpu")]
+    public bool UseGpu { get; set; } = true;
+
+    /// <summary>
+    /// true の場合、ローカルで文字起こしした生テキストをさらにクラウドの LLM で整形する
+    /// (ハイブリッドモード)。既定は移植元 Python 版と同じ「生の文字起こしのみ」(false)。
+    /// </summary>
+    [JsonPropertyName("refine_with_cloud")]
+    public bool RefineWithCloud { get; set; } = false;
+
+    /// <summary>
+    /// GGML モデルファイルの明示パス。null の場合は既定の保存先 (EnvLoader.GetAppDataDirectory()
+    /// 配下) から ModelSize に対応するファイルを探す。
+    /// </summary>
+    [JsonPropertyName("model_path")]
+    public string? ModelPath { get; set; } = null;
+}
+
+/// <summary>
+/// コンテキスト認識機能がアクティブウィンドウを検出した際に記録する「検出済みアプリ」1件分。
+/// 移植元 Python 版の detected_apps (src/core/config.py:89, src/core/context_prompt.py:207-219)
+/// に対応する。ユーザーはこの情報を設定画面の「カテゴリ」タブで確認し、
+/// キーワードを追加すべきアプリ名を知る手掛かりとして使う。
+/// </summary>
+public class DetectedAppInfo
+{
+    /// <summary>
+    /// 検出時のウィンドウタイトルの例。
+    /// 【プライバシー注意】ウィンドウタイトルには文書名・メールの件名・チャット相手の名前などが
+    /// 含まれうる。呼び出し側はこの値を絶対にログ (Core/Logger) へ書かないこと。
+    /// </summary>
+    [JsonPropertyName("title_sample")]
+    public string TitleSample { get; set; } = string.Empty;
+
+    /// <summary>検出時点でのキーワードによる自動判定カテゴリ (DEV/BIZ/DOC/STD)。</summary>
+    [JsonPropertyName("auto_category")]
+    public string AutoCategory { get; set; } = "STD";
+
+    /// <summary>
+    /// ユーザーが設定画面で明示的に割り当てたカテゴリ。未割り当ての場合は null。
+    /// 非 null の場合、Core/WindowDetector.DetectCategory はキーワードによる自動判定より
+    /// これを優先して返す (移植元 Python 版の get_effective_category, context_prompt.py:233-240 相当)。
+    /// </summary>
+    [JsonPropertyName("user_category")]
+    public string? UserCategory { get; set; } = null;
+}
+
 public class AppSettings
 {
     [JsonPropertyName("audio")]
@@ -88,11 +155,24 @@ public class AppSettings
     [JsonPropertyName("prompts")]
     public PromptSettings Prompts { get; set; } = new();
 
+    [JsonPropertyName("local")]
+    public LocalSettings Local { get; set; } = new();
+
     [JsonPropertyName("dictionary")]
     public Dictionary<string, string> Dictionary { get; set; } = [];
 
     [JsonPropertyName("context_aware_enabled")]
     public bool ContextAwareEnabled { get; set; } = true;
+
+    /// <summary>
+    /// コンテキスト認識で検出されたアプリの履歴。キーはアプリ名 (WindowInfo.ProcessName)。
+    /// 既存の settings.json にこのキーが無い場合 (移植前の設定ファイル) でも、この既定値
+    /// (空辞書) によりそのまま動作する。書き込みは Core/WindowDetector.DetectCategory
+    /// (新規アプリ検出時のみ) と Ui/SettingsWindow (カテゴリ割り当て・履歴クリア) から行われ、
+    /// いずれも Core/SettingsLock.Gate の下で保護すること。
+    /// </summary>
+    [JsonPropertyName("detected_apps")]
+    public Dictionary<string, DetectedAppInfo> DetectedApps { get; set; } = [];
 
     [JsonPropertyName("app_categories")]
     public Dictionary<string, List<string>> AppCategories { get; set; } = new()

@@ -63,8 +63,11 @@ public class HistoryManager
     private readonly string _historyPath;
     private static readonly JsonSerializerOptions _jsonOptions = new() { WriteIndented = true };
 
+    // 保存先ディレクトリの決定は EnvLoader.GetAppDataDirectory() に一元化している。
+    // 既定 (VOICEIN_PORTABLE 未設定) では従来と全く同じ %AppData%\VoiceIn を返すため、
+    // 既存ユーザーの history.json はそのまま読まれ続ける。
     private HistoryManager()
-        : this(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VoiceIn", "history.json"))
+        : this(Path.Combine(EnvLoader.GetAppDataDirectory(), "history.json"))
     {
     }
 

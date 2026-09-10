@@ -14,14 +14,9 @@ namespace VoiceIn;
 
 public partial class App : System.Windows.Application
 {
-    /// <summary>
-    /// settings.Dictionary (辞書置換ルール) への同時アクセスを保護するロック。
-    /// バックグラウンドスレッドでの辞書置換処理 (本クラス) と、
-    /// 設定画面での保存処理 (Ui/SettingsWindow.OnSaveAndApply) が同時に走ることで
-    /// 発生する InvalidOperationException (コレクション変更) を防ぐため、
-    /// 両方が同じロックオブジェクトを使用する。
-    /// </summary>
-    internal static readonly object DictionaryLock = new();
+    // settings.Dictionary / AppCategories / CategoryPrompts への同時アクセスを保護するロックは
+    // Core.SettingsLock.Gate に集約している (Core 層である WindowDetector からも参照するため、
+    // UI 層である本クラスに置くと依存関係が逆転してしまう)。詳細は Core/SettingsLock.cs 参照。
 
     private Mutex? _mutex;
     private bool _mutexOwned;
@@ -67,6 +62,31 @@ public partial class App : System.Windows.Application
         // 環境変数読み込み (.env)
         EnvLoader.Load();
 
+        // 新しいアプリを検出したときに settings.json へ永続化する手段を WindowDetector へ渡す。
+        // WindowDetector (Core 層) が SettingsManager.Instance を直接呼ぶ設計にすると、
+        // 素の AppSettings を渡して DetectCategory を呼ぶテストからも Instance への初回アクセスが
+        // 発生し、実ユーザーの %AppData%\VoiceIn が作られてしまう。そのため保存手段は注入とし、
+        // 本番であるここでのみ配線する。
+        // 【注意】この 1 行を消すと、検出済みアプリ履歴が保存されなくなる (無言で効かなくなる)。
+        WindowDetector.SaveSettingsCallback = _ => SettingsManager.Instance.Save();
+
+        // 起動時クリーンアップ: 前回までのクラッシュ・強制終了・電源断で消せなかった
+        // 古い一時 WAV ファイル (%TEMP%\voicein_*.wav、ユーザーの生の音声データを含む) を
+        // バックグラウンドで削除する。起動処理を遅延させないよう Task.Run で非同期に行い、
+        // 失敗しても起動を止めないよう例外はログに残すのみに留める
+        // (CleanupStaleTempFiles 自体もファイル単位で例外を握りつぶすが、念のため二重に保護する)。
+        Task.Run(() =>
+        {
+            try
+            {
+                AudioRecorder.CleanupStaleTempFiles();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("起動時の一時 WAV ファイルクリーンアップに失敗しました", ex);
+            }
+        });
+
         // オーバーレイUIの表示
         _overlayWindow = new OverlayWindow();
         _overlayWindow.SettingsRequested += OpenSettings;
@@ -93,12 +113,15 @@ public partial class App : System.Windows.Application
 
         // 初回起動判定: GEMINI_API_KEY / GROQ_API_KEY のどちらも未設定ならセットアップウィザードを開く
         // (移植元 Python 版 src/main.py の check_first_run と同じ判定)。
+        // ただし、現在のプロバイダが "local" の場合は API キー自体が不要な運用のため、
+        // この判定には含めない (ローカル運用のユーザーが毎回ウィザードを開かれることを防ぐ)。
         // OnStartup の中で同期的に ShowDialog() を呼ぶと起動処理をブロックしてしまうため、
         // Dispatcher.BeginInvoke でメッセージループが回り始めてから (オーバーレイ表示・トレイアイコン
         // 初期化が完了した後) モードレスに Show() する。
+        bool isLocalProvider = SettingsManager.Instance.CurrentProvider.ToLowerInvariant() == "local";
         bool hasGeminiKey = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GEMINI_API_KEY"));
         bool hasGroqKey = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GROQ_API_KEY"));
-        if (!hasGeminiKey && !hasGroqKey)
+        if (!isLocalProvider && !hasGeminiKey && !hasGroqKey)
         {
             Dispatcher.BeginInvoke(new Action(OpenSetupWizard));
         }
@@ -142,12 +165,15 @@ public partial class App : System.Windows.Application
 
         var geminiItem = new Forms.ToolStripMenuItem("Gemini に切替", null, (s, e) => SwitchProvider("gemini"));
         var groqItem = new Forms.ToolStripMenuItem("Groq に切替", null, (s, e) => SwitchProvider("groq"));
+        var localItem = new Forms.ToolStripMenuItem("Local に切替", null, (s, e) => SwitchProvider("local"));
 
         if (provider.ToLowerInvariant() == "gemini") geminiItem.Checked = true;
         if (provider.ToLowerInvariant() == "groq") groqItem.Checked = true;
+        if (provider.ToLowerInvariant() == "local") localItem.Checked = true;
 
         menu.Items.Add(geminiItem);
         menu.Items.Add(groqItem);
+        menu.Items.Add(localItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
 
         menu.Items.Add("セットアップウィザード...", null, (s, e) => OpenSetupWizard());
@@ -305,17 +331,30 @@ public partial class App : System.Windows.Application
                 string promptText;
                 string currentProvider = SettingsManager.Instance.CurrentProvider.ToLowerInvariant();
 
-                if (currentProvider == "groq")
+                // settings.CategoryPrompts は設定画面での保存処理 (Ui/SettingsWindow.OnSaveAndApply)
+                // からバックグラウンドスレッドで参照ごと差し替えられうるため、SettingsLock.Gate の下で
+                // TryGetValue とその結果の利用 (ternary) までをまとめて行う。ロック内で行うのは
+                // 辞書からの値取得と短い文字列整形のみで、この後に続くネットワーク I/O
+                // (provider.TranscribeAsync) や await はロックの外で行う。
+                lock (SettingsLock.Gate)
                 {
-                    promptText = useCategoryPrompt && settings.CategoryPrompts.TryGetValue(category, out var catPrompt)
-                        ? catPrompt
-                        : settings.Prompts.GroqRefineSystemPrompt;
-                }
-                else
-                {
-                    promptText = useCategoryPrompt && settings.CategoryPrompts.TryGetValue(category, out var catPrompt)
-                        ? $"{settings.Prompts.GeminiTranscribePrompt}\n\n【追加コンテキスト指示 ({category})】\n{catPrompt}"
-                        : settings.Prompts.GeminiTranscribePrompt;
+                    // "local" は Whisper.net でのオフライン文字起こし後、設定で有効な場合のみ
+                    // クラウド LLM (Groq) へ整形を委譲する (Ai/LocalProvider.cs のハイブリッド
+                    // モード参照)。渡すべきプロンプトは「音声を文字起こしせよ」という Gemini 用の
+                    // 指示ではなく、「文字起こし済みテキストを整形せよ」という Groq と同種の
+                    // 指示であるべきなので、"groq" と同じ分岐に合流させる。
+                    if (currentProvider == "groq" || currentProvider == "local")
+                    {
+                        promptText = useCategoryPrompt && settings.CategoryPrompts.TryGetValue(category, out var catPrompt)
+                            ? catPrompt
+                            : settings.Prompts.GroqRefineSystemPrompt;
+                    }
+                    else
+                    {
+                        promptText = useCategoryPrompt && settings.CategoryPrompts.TryGetValue(category, out var catPrompt)
+                            ? $"{settings.Prompts.GeminiTranscribePrompt}\n\n【追加コンテキスト指示 ({category})】\n{catPrompt}"
+                            : settings.Prompts.GeminiTranscribePrompt;
+                    }
                 }
 
                 var provider = AiProviderFactory.CreateProvider(currentProvider);
@@ -323,12 +362,12 @@ public partial class App : System.Windows.Application
 
                 // 辞書置換
                 // ・置換中に設定画面側で Dictionary が変更されても影響を受けないよう、
-                //   DictionaryLock (Ui/SettingsWindow.OnSaveAndApply と共有) の下でスナップショットを取る。
+                //   SettingsLock.Gate (Ui/SettingsWindow.OnSaveAndApply と共有) の下でスナップショットを取る。
                 // ・Dictionary の列挙順序は保証されない (string.GetHashCode がプロセスごとに
                 //   ランダム化されるため) ので、キー文字列長の降順に明示ソートしてから適用し、
                 //   部分文字列衝突による連鎖置換や起動ごとの結果ぶれを防ぐ。
                 KeyValuePair<string, string>[] dictSnapshot;
-                lock (DictionaryLock)
+                lock (SettingsLock.Gate)
                 {
                     dictSnapshot = settings.Dictionary
                         .OrderByDescending(kv => kv.Key.Length)

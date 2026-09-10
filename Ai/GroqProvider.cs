@@ -80,6 +80,24 @@ public class GroqProvider : IAiProvider
         return result.Trim();
     }
 
+    /// <summary>
+    /// 生の文字起こしテキストを Groq の LLM で整形して返す (テキストイン・テキストアウト)。
+    /// LocalProvider のハイブリッドモード (ローカルで文字起こし → クラウド LLM で整形) から
+    /// 再利用するために、内部の 3 引数版から API キー解決のみを切り出して public 化している。
+    /// GROQ_API_KEY が未設定の場合は例外を投げるので、呼び出し側 (LocalProvider) で
+    /// キャッチし、整形をあきらめて生の文字起こし結果を返すフォールバックを行うこと。
+    /// </summary>
+    public async Task<string> RefineTextAsync(string rawText, string systemPrompt)
+    {
+        string? apiKey = Environment.GetEnvironmentVariable("GROQ_API_KEY");
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            throw new InvalidOperationException("GROQ_API_KEY が設定されていません。.env ファイルを確認してください。");
+        }
+
+        return await RefineTextAsync(rawText, apiKey, systemPrompt);
+    }
+
     private async Task<string> RefineTextAsync(string rawText, string apiKey, string systemPrompt)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.groq.com/openai/v1/chat/completions");

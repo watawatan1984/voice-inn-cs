@@ -1,8 +1,13 @@
 using System;
 using System.Collections.ObjectModel;
 using System.Globalization;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
+using VoiceIn.Ai;
 using VoiceIn.Audio;
 using VoiceIn.Core;
 
@@ -14,24 +19,99 @@ public class DictEntry
     public string To { get; set; } = string.Empty;
 }
 
+public class CategoryKeywordEntry
+{
+    public string Keyword { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// 「検出済みアプリ履歴」一覧 (GridDetectedApps) の表示用モデル。
+/// AppSettings.DetectedApps (Dictionary&lt;string, DetectedAppInfo&gt;) の 1 エントリを
+/// 画面表示しやすい形に変換したものであり、settings 本体への書き戻しには使わない
+/// (書き戻しは OnAssignDetectedAppCategory / OnClearDetectedApps が直接 settings を操作する)。
+/// </summary>
+public class DetectedAppEntry
+{
+    public string AppName { get; set; } = string.Empty;
+    public string AutoCategory { get; set; } = string.Empty;
+
+    /// <summary>UserCategory が未設定の場合の表示用プレースホルダーを含んだ表示文字列。</summary>
+    public string UserCategoryDisplay { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 検出時のウィンドウタイトルの例。プライバシー注意: 文書名・チャット相手の名前などを
+    /// 含みうる値であり、Core/Logger には絶対に渡さないこと (このプロパティ自体は画面表示専用)。
+    /// </summary>
+    public string TitleSample { get; set; } = string.Empty;
+}
+
 public partial class SettingsWindow : Window
 {
     public event Action? SettingsSaved;
     private readonly ObservableCollection<DictEntry> _dictEntries = [];
 
+    // カテゴリ設定 (カテゴリ切り替え時に編集中の内容を失わないよう、
+    // 選択中でないカテゴリの編集内容もここに保持しておき、保存時にまとめて
+    // settings.AppCategories / settings.CategoryPrompts へ書き戻す。移植元 Python 版
+    // (src/ui/settings.py の _build_categories_tab) と同じ「切替時に退避・保存時に一括反映」方式。
+    private readonly ObservableCollection<CategoryKeywordEntry> _categoryKeywordEntries = [];
+    private Dictionary<string, List<string>> _categoryKeywordsWorking = new();
+    private Dictionary<string, string> _categoryPromptsWorking = new();
+    private string? _currentCategoryKey;
+
+    // 検出済みアプリ履歴 (GridDetectedApps) の表示用コレクション。分類キーワード/プロンプトと
+    // 異なり、この一覧は「保存して適用」を待たずに SettingsManager.Instance.Settings を
+    // 直接読み書きする (詳細は LoadDetectedApps / OnAssignDetectedAppCategory 参照)。
+    private readonly ObservableCollection<DetectedAppEntry> _detectedAppEntries = [];
+
+    // ローカルモデルのダウンロード中にキャンセルを通知するためのトークンソース。
+    // ダウンロード中でないときは null。ウィンドウを閉じたときにも取りこぼさず
+    // キャンセルできるよう、Closed イベントでも参照する。
+    private CancellationTokenSource? _modelDownloadCts;
+
+    // マイクテスト (レベルメーター) 専用の AudioRecorder。App.xaml.cs がホットキー録音用に
+    // 保持しているインスタンスとは別物であり (App.xaml.cs は編集禁止のためインスタンスを
+    // 共有できない)、Start()/Stop() による実録音には一切使わず、StartMonitoring/StopMonitoring
+    // のみを呼ぶ。録音とモニタリングの二重オープン回避は AudioRecorder 側の static な
+    // 排他制御 (Audio/AudioRecorder.cs 参照) が担う。
+    private readonly AudioRecorder _micTestRecorder = new();
+
+    // マイクテストのバー表示更新用タイマー。NAudio のキャプチャコールバック (別スレッド) から
+    // 直接 UI を更新しないよう、UI スレッドの DispatcherTimer で _micTestRecorder の
+    // CurrentMonitoringRms を定期的にポーリングする。
+    private DispatcherTimer? _micTestTimer;
+
     public SettingsWindow()
     {
         InitializeComponent();
         LoadSettings();
+
+        // ウィンドウを閉じた後もバックグラウンドでダウンロードが走り続けないよう、
+        // 閉じた時点で確実にキャンセルする。
+        Closed += (s, e) => _modelDownloadCts?.Cancel();
+
+        // マイクが開きっぱなしにならないよう、ウィンドウを閉じたら必ずマイクテストを止める。
+        // _micTestRecorder.Dispose() は内部で StopMonitoring() を呼ぶため、トグルボタンで
+        // 止め忘れていた場合でも確実にデバイスが解放される。
+        Closed += (s, e) =>
+        {
+            _micTestTimer?.Stop();
+            _micTestRecorder.Dispose();
+        };
     }
 
     private void LoadSettings()
     {
         var settings = SettingsManager.Instance.Settings;
 
-        // プロバイダ
+        // プロバイダ (gemini/groq/local の3択)
         string curProvider = SettingsManager.Instance.CurrentProvider;
-        CmbProvider.SelectedIndex = curProvider.ToLowerInvariant() == "groq" ? 1 : 0;
+        CmbProvider.SelectedIndex = curProvider.ToLowerInvariant() switch
+        {
+            "groq" => 1,
+            "local" => 2,
+            _ => 0
+        };
 
         // Gemini API キー: 設定済みでも実際の値は表示せず、ステータス表示のみ行う
         InitializeApiKeyField(PwdGeminiApiKey, TxtGeminiApiKeyVisible, LblGeminiApiKeyStatus, "GEMINI_API_KEY");
@@ -88,6 +168,228 @@ public partial class SettingsWindow : Window
             _dictEntries.Add(new DictEntry { From = k, To = v });
         }
         GridDictionary.ItemsSource = _dictEntries;
+
+        // カテゴリ
+        // settings.AppCategories / settings.CategoryPrompts 自体はここではまだ変更しない
+        // (保存を押すまでは読み込み専用のコピーを画面上で編集する)。キー・値ともに
+        // 独立した新しい Dictionary/List へコピーし、画面編集が settings 側の実体に
+        // 影響しないようにする。
+        _categoryKeywordsWorking = settings.AppCategories.ToDictionary(
+            kv => kv.Key,
+            kv => new List<string>(kv.Value));
+        _categoryPromptsWorking = new Dictionary<string, string>(settings.CategoryPrompts);
+
+        GridCategoryKeywords.ItemsSource = _categoryKeywordEntries;
+
+        _currentCategoryKey = null;
+        CmbCategory.Items.Clear();
+        foreach (var categoryKey in _categoryKeywordsWorking.Keys)
+        {
+            CmbCategory.Items.Add(categoryKey);
+        }
+        if (CmbCategory.Items.Count > 0)
+        {
+            CmbCategory.SelectedIndex = 0;
+        }
+
+        // 検出済みアプリ履歴の割り当て先コンボボックス。キーワード編集用の CmbCategory と
+        // 同じカテゴリ一覧を使うが、選択が連動すると紛らわしいため独立したコントロールにする。
+        CmbAssignCategory.Items.Clear();
+        foreach (var categoryKey in _categoryKeywordsWorking.Keys)
+        {
+            CmbAssignCategory.Items.Add(categoryKey);
+        }
+        if (CmbAssignCategory.Items.Count > 0)
+        {
+            CmbAssignCategory.SelectedIndex = 0;
+        }
+
+        LoadDetectedApps();
+
+        // ローカル (オフライン) 設定
+        PopulateLocalModelSizeCombo();
+        SetLocalModelSizeSelection(settings.Local.ModelSize);
+        ChkLocalUseGpu.IsChecked = settings.Local.UseGpu;
+        ChkLocalRefineWithCloud.IsChecked = settings.Local.RefineWithCloud;
+        RefreshLocalModelStatus();
+    }
+
+    /// <summary>
+    /// ModelDownloader.SupportedModelSizes を唯一の情報源として、モデルサイズ選択コンボボックスの
+    /// 選択肢を組み立てる。表示テキストにおおよそのファイルサイズを併記し、実際の値
+    /// (tiny/base/small/medium/large-v3) は各項目の Tag に保持する (XAML 側にはサイズを
+    /// ハードコードしない)。
+    /// </summary>
+    private void PopulateLocalModelSizeCombo()
+    {
+        CmbLocalModelSize.Items.Clear();
+        foreach (var info in ModelDownloader.SupportedModelSizes)
+        {
+            CmbLocalModelSize.Items.Add(new ComboBoxItem
+            {
+                Content = $"{info.Id} ({info.ApproxSizeLabel})",
+                Tag = info.Id
+            });
+        }
+    }
+
+    /// <summary>
+    /// 指定したモデルサイズ名に対応する項目をコンボボックスで選択する。
+    /// 未知のサイズ名 (settings.json の手動編集等) の場合は既定値である "small" を選択する。
+    /// </summary>
+    private void SetLocalModelSizeSelection(string modelSize)
+    {
+        for (int i = 0; i < CmbLocalModelSize.Items.Count; i++)
+        {
+            if (CmbLocalModelSize.Items[i] is ComboBoxItem item &&
+                string.Equals(item.Tag as string, modelSize, StringComparison.OrdinalIgnoreCase))
+            {
+                CmbLocalModelSize.SelectedIndex = i;
+                return;
+            }
+        }
+
+        for (int i = 0; i < CmbLocalModelSize.Items.Count; i++)
+        {
+            if (CmbLocalModelSize.Items[i] is ComboBoxItem item &&
+                string.Equals(item.Tag as string, "small", StringComparison.OrdinalIgnoreCase))
+            {
+                CmbLocalModelSize.SelectedIndex = i;
+                return;
+            }
+        }
+    }
+
+    /// <summary>現在コンボボックスで選択されているモデルサイズ名 (tiny/base/small/medium/large-v3) を返す。</summary>
+    private string GetSelectedLocalModelSize()
+    {
+        return (CmbLocalModelSize.SelectedItem as ComboBoxItem)?.Tag as string ?? "small";
+    }
+
+    private void OnLocalModelSizeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        RefreshLocalModelStatus();
+    }
+
+    /// <summary>
+    /// 現在選択中のモデルサイズについて、実際に使われるパス (LocalSettings.ModelPath が
+    /// 明示されていればそれを優先し、無ければ既定の保存先) にモデルファイルが存在するかどうかを
+    /// 画面に反映する。ネットワーク I/O は一切行わない。
+    /// </summary>
+    private void RefreshLocalModelStatus()
+    {
+        string modelSize = GetSelectedLocalModelSize();
+        string? explicitPath = SettingsManager.Instance.Settings.Local.ModelPath;
+        string effectivePath = string.IsNullOrWhiteSpace(explicitPath)
+            ? ModelDownloader.GetModelFilePath(modelSize)
+            : explicitPath;
+
+        if (File.Exists(effectivePath))
+        {
+            LblLocalModelStatus.Text = $"モデルは見つかりました。\n{effectivePath}";
+            LblLocalModelStatus.Foreground = new System.Windows.Media.SolidColorBrush(Color.FromRgb(0xA6, 0xE3, 0xA1));
+        }
+        else
+        {
+            LblLocalModelStatus.Text = $"モデルが見つかりません。ダウンロードが必要です。\n(想定パス: {effectivePath})";
+            LblLocalModelStatus.Foreground = new System.Windows.Media.SolidColorBrush(Color.FromRgb(0xF3, 0x8B, 0xA8));
+        }
+    }
+
+    /// <summary>
+    /// モデルのダウンロードを実行する。実行前に「おおよそのサイズを提示して確認」「既に存在する
+    /// 場合は上書き確認」の 2 段階の確認を行い、進捗表示・キャンセル・完了後の状態表示更新までを
+    /// 一通り行う。ネットワーク I/O 自体は VoiceIn.Ai.ModelDownloader に委譲する。
+    /// async void だが UI イベントハンドラであり (WPF での唯一の正当な async void の用途)、
+    /// 例外は内部で全て catch して MessageBox 表示にとどめ、外へは決して漏らさない。
+    /// </summary>
+    private async void OnDownloadModel(object sender, RoutedEventArgs e)
+    {
+        string modelSize = GetSelectedLocalModelSize();
+        var sizeInfo = ModelDownloader.FindModelSizeInfo(modelSize);
+        string sizeLabel = sizeInfo?.ApproxSizeLabel ?? "不明なサイズ";
+
+        if (ModelDownloader.ModelExists(modelSize))
+        {
+            var overwriteResult = MessageBox.Show(
+                $"{modelSize} モデルは既定の保存先に既にダウンロード済みです。再ダウンロードして上書きしますか?",
+                "Voice In - モデルのダウンロード",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+            if (overwriteResult != MessageBoxResult.Yes)
+            {
+                return;
+            }
+        }
+
+        var confirmResult = MessageBox.Show(
+            $"{modelSize} モデル ({sizeLabel}) をダウンロードします。ネットワーク環境によっては数分かかる場合があります。よろしいですか?",
+            "Voice In - モデルのダウンロード",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question);
+        if (confirmResult != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        _modelDownloadCts = new CancellationTokenSource();
+        BtnDownloadModel.IsEnabled = false;
+        CmbLocalModelSize.IsEnabled = false;
+        BtnCancelModelDownload.Visibility = Visibility.Visible;
+        PbModelDownload.Visibility = Visibility.Visible;
+        PbModelDownload.Value = 0;
+        LblModelDownloadStatus.Visibility = Visibility.Visible;
+        LblModelDownloadStatus.Text = "ダウンロードを開始しています...";
+
+        // Progress<T>.Report は生成時 (=ここ、UI スレッド) にキャプチャした SynchronizationContext
+        // 上で実行されるため、追加の Dispatcher.Invoke なしでここから直接 UI 要素を更新できる。
+        var progress = new Progress<ModelDownloader.ModelDownloadProgress>(p =>
+        {
+            double approxTotal = p.TotalBytesApprox > 0 ? p.TotalBytesApprox : 1;
+            double ratio = Math.Min(0.99, p.BytesDownloaded / approxTotal);
+            PbModelDownload.Value = ratio * 100.0;
+            LblModelDownloadStatus.Text =
+                $"ダウンロード中... {FormatBytes(p.BytesDownloaded)} / 約{FormatBytes(p.TotalBytesApprox)} ({ratio * 100:F0}%)";
+        });
+
+        try
+        {
+            await ModelDownloader.DownloadModelAsync(modelSize, progress, _modelDownloadCts.Token);
+            PbModelDownload.Value = 100;
+            LblModelDownloadStatus.Text = "ダウンロードが完了しました。";
+            MessageBox.Show("モデルのダウンロードが完了しました。", "Voice In", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (OperationCanceledException)
+        {
+            LblModelDownloadStatus.Text = "ダウンロードをキャンセルしました。";
+        }
+        catch (Exception ex)
+        {
+            LblModelDownloadStatus.Text = "ダウンロードに失敗しました。";
+            MessageBox.Show($"モデルのダウンロードに失敗しました: {ex.Message}", "Voice In - エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            BtnDownloadModel.IsEnabled = true;
+            CmbLocalModelSize.IsEnabled = true;
+            BtnCancelModelDownload.Visibility = Visibility.Collapsed;
+            _modelDownloadCts?.Dispose();
+            _modelDownloadCts = null;
+            RefreshLocalModelStatus();
+        }
+    }
+
+    private void OnCancelModelDownload(object sender, RoutedEventArgs e)
+    {
+        _modelDownloadCts?.Cancel();
+    }
+
+    /// <summary>バイト数を MB/GB 単位の読みやすい文字列に整形する (表示専用、丸め誤差は許容する)。</summary>
+    private static string FormatBytes(long bytes)
+    {
+        const double Mb = 1024.0 * 1024.0;
+        const double Gb = Mb * 1024.0;
+        return bytes >= Gb ? $"{bytes / Gb:F2}GB" : $"{bytes / Mb:F1}MB";
     }
 
     private void OnDeleteDictItem(object sender, RoutedEventArgs e)
@@ -96,6 +398,248 @@ public partial class SettingsWindow : Window
         {
             _dictEntries.Remove(selected);
         }
+    }
+
+    /// <summary>
+    /// カテゴリ選択が変わったときに呼ばれる。切り替え前のカテゴリの編集内容
+    /// (キーワード一覧・プロンプト) を _categoryKeywordsWorking / _categoryPromptsWorking へ
+    /// 退避してから、新しく選択されたカテゴリの内容を画面へ読み込む。
+    /// これにより、カテゴリを行き来しても入力中の内容が失われない。
+    /// </summary>
+    private void OnCategorySelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (e.RemovedItems.Count > 0 && e.RemovedItems[0] is string previousCategory)
+        {
+            CaptureCurrentCategoryEdits(previousCategory);
+        }
+
+        if (CmbCategory.SelectedItem is string newCategory)
+        {
+            LoadCategoryIntoEditors(newCategory);
+            _currentCategoryKey = newCategory;
+        }
+        else
+        {
+            _currentCategoryKey = null;
+        }
+    }
+
+    /// <summary>
+    /// 画面 (GridCategoryKeywords / TxtCategoryPrompt) に表示中の内容を、指定したカテゴリの
+    /// ものとして _categoryKeywordsWorking / _categoryPromptsWorking へ書き戻す。
+    /// カテゴリ切り替え時と保存時 (OnSaveAndApply) の両方から呼ばれる。
+    /// </summary>
+    private void CaptureCurrentCategoryEdits(string category)
+    {
+        var keywords = new List<string>();
+        foreach (var entry in _categoryKeywordEntries)
+        {
+            if (!string.IsNullOrWhiteSpace(entry.Keyword))
+            {
+                keywords.Add(entry.Keyword.Trim());
+            }
+        }
+
+        _categoryKeywordsWorking[category] = keywords;
+        _categoryPromptsWorking[category] = TxtCategoryPrompt.Text;
+    }
+
+    /// <summary>
+    /// _categoryKeywordsWorking / _categoryPromptsWorking に退避してある、指定カテゴリの内容を
+    /// 画面 (GridCategoryKeywords / TxtCategoryPrompt) へ読み込む。
+    /// </summary>
+    private void LoadCategoryIntoEditors(string category)
+    {
+        _categoryKeywordEntries.Clear();
+        if (_categoryKeywordsWorking.TryGetValue(category, out var keywords))
+        {
+            foreach (var kw in keywords)
+            {
+                _categoryKeywordEntries.Add(new CategoryKeywordEntry { Keyword = kw });
+            }
+        }
+
+        TxtCategoryPrompt.Text = _categoryPromptsWorking.TryGetValue(category, out var prompt) ? prompt : string.Empty;
+    }
+
+    private void OnDeleteCategoryKeywordItem(object sender, RoutedEventArgs e)
+    {
+        if (GridCategoryKeywords.SelectedItem is CategoryKeywordEntry selected)
+        {
+            _categoryKeywordEntries.Remove(selected);
+        }
+    }
+
+    /// <summary>
+    /// SettingsManager.Instance.Settings.DetectedApps (検出済みアプリ履歴) を画面の一覧
+    /// (GridDetectedApps) へ読み込む。ウィンドウを開いたときに加え、カテゴリ割り当て・
+    /// 履歴クリアの直後にも呼び、画面へ即座に反映する。
+    ///
+    /// 分類キーワード/カテゴリ別プロンプトの編集 (_categoryKeywordsWorking 等) と異なり、
+    /// この一覧は「保存して適用」を待たない (OnAssignDetectedAppCategory / OnClearDetectedApps
+    /// が直接 settings を読み書きして即座に保存するため、常に最新の実データを表示する)。
+    /// </summary>
+    private void LoadDetectedApps()
+    {
+        var settings = SettingsManager.Instance.Settings;
+
+        KeyValuePair<string, DetectedAppInfo>[] snapshot;
+        lock (SettingsLock.Gate)
+        {
+            settings.DetectedApps ??= [];
+            snapshot = settings.DetectedApps.ToArray();
+        }
+
+        _detectedAppEntries.Clear();
+        foreach (var (appName, info) in snapshot.OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            _detectedAppEntries.Add(new DetectedAppEntry
+            {
+                AppName = appName,
+                AutoCategory = info.AutoCategory,
+                UserCategoryDisplay = string.IsNullOrEmpty(info.UserCategory) ? "(未割り当て)" : info.UserCategory,
+                TitleSample = info.TitleSample
+            });
+        }
+
+        GridDetectedApps.ItemsSource = _detectedAppEntries;
+    }
+
+    /// <summary>
+    /// カテゴリ割り当ての中核処理 (SettingsManager や WPF に依存しない、テスト可能な純粋処理)。
+    /// 移植元 Python 版 (src/ui/settings.py:709-745) と同じく、以下をまとめて行う:
+    /// (1) settings.DetectedApps[appName].user_category に targetCategory を設定する
+    ///     (既存インスタンスは書き換えず、新しいインスタンスで丸ごと差し替える方式)。
+    /// (2) appName を小文字化したうえで、settings.AppCategories[targetCategory] の
+    ///     キーワード一覧へ追加する (大文字小文字を無視した重複チェック付き)。
+    /// 両方とも SettingsLock.Gate の下、辞書の参照・小さな値の代入のみで完結させ、
+    /// ファイル I/O は一切行わない (呼び出し側が SettingsManager.Instance.Save() を別途行う)。
+    /// internal であり、Ui/SettingsWindow を WPF ホスト無しにインスタンス化できないテストからも、
+    /// この静的メソッド単体としてなら直接呼び出して検証できる。
+    /// </summary>
+    internal static void ApplyDetectedAppCategoryAssignment(AppSettings settings, string appName, string targetCategory)
+    {
+        string lowerAppName = appName.ToLowerInvariant();
+
+        lock (SettingsLock.Gate)
+        {
+            settings.DetectedApps ??= [];
+            if (settings.DetectedApps.TryGetValue(appName, out var existing))
+            {
+                // 既存インスタンスのフィールドを直接書き換えるのではなく、新しいインスタンスで
+                // 丸ごと差し替える (このロックの外で同じ辞書を読む Core.WindowDetector 側との
+                // 一貫性を保つための、このコードベース全体で使われている方式)。
+                settings.DetectedApps[appName] = new DetectedAppInfo
+                {
+                    TitleSample = existing.TitleSample,
+                    AutoCategory = existing.AutoCategory,
+                    UserCategory = targetCategory
+                };
+            }
+
+            if (!settings.AppCategories.TryGetValue(targetCategory, out var keywordList))
+            {
+                keywordList = [];
+                settings.AppCategories[targetCategory] = keywordList;
+            }
+
+            bool alreadyPresent = keywordList.Any(k => string.Equals(k, lowerAppName, StringComparison.OrdinalIgnoreCase));
+            if (!alreadyPresent)
+            {
+                keywordList.Add(lowerAppName);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 選択したアプリへカテゴリを割り当てる。移植元 Python 版 (src/ui/settings.py:709-745) と
+    /// 同じく、(1) detected_apps[アプリ名].user_category を設定し、(2) アプリ名を小文字化して
+    /// そのカテゴリのキーワード一覧へ追加する (大文字小文字を無視した重複チェック付き) を
+    /// まとめて行い、即座に SettingsManager.Instance.Save() で保存する。
+    ///
+    /// このウィンドウの他の編集 (分類キーワード・カテゴリ別プロンプト) は「保存して適用」
+    /// (OnSaveAndApply) を押すまで settings 本体には反映されず、_categoryKeywordsWorking /
+    /// _categoryPromptsWorking に退避されるだけである。一方この割り当て操作は、移植元と同じく
+    /// 「割り当てたら即座に保存される」独立した操作として扱う。そのため、後で
+    /// 「保存して適用」が押されたときに settings.AppCategories が _categoryKeywordsWorking の
+    /// (この割り当てを知らない) 古い内容で丸ごと上書きされ、ここで追加したキーワードが
+    /// 消えてしまわないよう、_categoryKeywordsWorking (および画面に表示中であればキーワード
+    /// 編集グリッドの内容) にも同じキーワード追加を反映しておく。
+    /// </summary>
+    private void OnAssignDetectedAppCategory(object sender, RoutedEventArgs e)
+    {
+        if (GridDetectedApps.SelectedItem is not DetectedAppEntry selected)
+        {
+            MessageBox.Show("カテゴリを割り当てるアプリを選択してください。", "Voice In", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        if (CmbAssignCategory.SelectedItem is not string targetCategory || string.IsNullOrWhiteSpace(targetCategory))
+        {
+            MessageBox.Show("割り当て先のカテゴリを選択してください。", "Voice In", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var settings = SettingsManager.Instance.Settings;
+        string lowerAppName = selected.AppName.ToLowerInvariant();
+
+        ApplyDetectedAppCategoryAssignment(settings, selected.AppName, targetCategory);
+
+        SettingsManager.Instance.Save();
+
+        // 「保存して適用」待ちのステージ済みコピーにも反映する (反映しないと、この後
+        // 「保存して適用」を押したときに settings.AppCategories が古い _categoryKeywordsWorking
+        // の内容で丸ごと上書きされ、今追加したキーワードが失われてしまう)。
+        if (!_categoryKeywordsWorking.TryGetValue(targetCategory, out var workingList))
+        {
+            workingList = [];
+            _categoryKeywordsWorking[targetCategory] = workingList;
+        }
+        if (!workingList.Any(k => string.Equals(k, lowerAppName, StringComparison.OrdinalIgnoreCase)))
+        {
+            workingList.Add(lowerAppName);
+        }
+
+        // 現在キーワード編集グリッドに表示中のカテゴリと一致する場合は、画面にも即座に反映する。
+        if (_currentCategoryKey == targetCategory &&
+            !_categoryKeywordEntries.Any(k => string.Equals(k.Keyword, lowerAppName, StringComparison.OrdinalIgnoreCase)))
+        {
+            _categoryKeywordEntries.Add(new CategoryKeywordEntry { Keyword = lowerAppName });
+        }
+
+        LoadDetectedApps();
+
+        MessageBox.Show($"「{selected.AppName}」を {targetCategory} に割り当てました。", "Voice In", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    /// <summary>
+    /// 検出済みアプリ履歴を全件削除する。取り消せない操作のため、既存の履歴ウィンドウ
+    /// (Ui/HistoryWindow.OnDeleteAll) と同じ方針で確認ダイアログを出し、既定ボタンを
+    /// 「いいえ」にすることで誤操作を防ぐ。
+    /// </summary>
+    private void OnClearDetectedApps(object sender, RoutedEventArgs e)
+    {
+        var result = MessageBox.Show(
+            "検出済みアプリ履歴をすべて削除します。この操作は取り消せません。よろしいですか?",
+            "Voice In",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (result != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        var settings = SettingsManager.Instance.Settings;
+        lock (SettingsLock.Gate)
+        {
+            settings.DetectedApps ??= [];
+            settings.DetectedApps.Clear();
+        }
+
+        SettingsManager.Instance.Save();
+        LoadDetectedApps();
     }
 
     private void OnSaveAndApply(object sender, RoutedEventArgs e)
@@ -176,6 +720,11 @@ public partial class SettingsWindow : Window
         settings.Audio.AutoPaste = ChkAutoPaste.IsChecked ?? true;
         settings.ContextAwareEnabled = ChkContextAware.IsChecked ?? true;
 
+        // ローカル (オフライン) 設定
+        settings.Local.ModelSize = GetSelectedLocalModelSize();
+        settings.Local.UseGpu = ChkLocalUseGpu.IsChecked ?? true;
+        settings.Local.RefineWithCloud = ChkLocalRefineWithCloud.IsChecked ?? false;
+
         // プロンプト
         settings.Prompts.GeminiTranscribePrompt = TxtGeminiPrompt.Text;
         settings.Prompts.GroqWhisperPrompt = TxtGroqWhisperPrompt.Text;
@@ -184,8 +733,8 @@ public partial class SettingsWindow : Window
         // 辞書
         // バックグラウンドスレッドでの辞書置換処理 (App.OnKeyReleased) と競合し、
         // "Collection was modified" 例外や置換結果の消失が起きないよう、
-        // App 側と同じロック (App.DictionaryLock) の下で更新する。
-        lock (VoiceIn.App.DictionaryLock)
+        // App 側と同じロック (SettingsLock.Gate) の下で更新する。
+        lock (SettingsLock.Gate)
         {
             settings.Dictionary.Clear();
             foreach (var entry in _dictEntries)
@@ -195,6 +744,39 @@ public partial class SettingsWindow : Window
                     settings.Dictionary[entry.From.Trim()] = entry.To ?? string.Empty;
                 }
             }
+        }
+
+        // カテゴリ
+        // 現在画面に表示されているカテゴリの編集内容は、まだ _categoryKeywordsWorking /
+        // _categoryPromptsWorking に退避されていない (カテゴリ切り替え時にしか退避しないため)。
+        // 保存前にここで一度確定させる。
+        if (_currentCategoryKey != null)
+        {
+            CaptureCurrentCategoryEdits(_currentCategoryKey);
+        }
+
+        // settings.AppCategories / settings.CategoryPrompts は、バックグラウンドスレッドからも
+        // 読まれている (Core.WindowDetector.DetectCategory が AppCategories を、
+        // App.xaml.cs の Task.Run 内が CategoryPrompts.TryGetValue を参照する)。
+        // どちらの読み取り側も SettingsLock.Gate を取ってから参照するようになっているため、
+        // 既存の Dictionary (単語置換辞書) と同じ SettingsLock.Gate を流用して保護しつつ、
+        // ロックの外で新しい Dictionary/List を先に組み立てておき、ロック内では
+        // settings 側のプロパティへの参照差し替えのみを行うことで、書き換え自体を
+        // 一括・最短時間にする。既存インスタンスを Clear/Add で書き換えるのではなく
+        // 新しいインスタンスに丸ごと差し替えるため、差し替え中に読み取り側が既に
+        // 列挙を開始していた場合でも (差し替え前の) 古いインスタンスをそのまま
+        // 列挙し続けるだけで済み、「コレクションが変更されました」例外にはならない。
+        var newAppCategories = new Dictionary<string, List<string>>();
+        foreach (var (cat, keywords) in _categoryKeywordsWorking)
+        {
+            newAppCategories[cat] = new List<string>(keywords);
+        }
+        var newCategoryPrompts = new Dictionary<string, string>(_categoryPromptsWorking);
+
+        lock (SettingsLock.Gate)
+        {
+            settings.AppCategories = newAppCategories;
+            settings.CategoryPrompts = newCategoryPrompts;
         }
 
         SettingsManager.Instance.Save();
@@ -207,6 +789,94 @@ public partial class SettingsWindow : Window
     private void OnCancel(object sender, RoutedEventArgs e)
     {
         Close();
+    }
+
+    /// <summary>
+    /// マイクテストのトグルボタン。モニタリング中でなければ開始し、モニタリング中であれば停止する。
+    /// </summary>
+    private void OnToggleMicTest(object sender, RoutedEventArgs e)
+    {
+        if (_micTestRecorder.IsMonitoring)
+        {
+            StopMicTest();
+        }
+        else
+        {
+            StartMicTest();
+        }
+    }
+
+    /// <summary>
+    /// 現在 CmbMicDevice で選択されているデバイスに対してマイクテストを開始する。
+    /// 録音中 (ホットキーによるものを含む) や、デバイスが他アプリで使用中・無効化されている
+    /// 場合は AudioRecorder.StartMonitoring が例外を投げるので、ここで catch して
+    /// 「何が起きたか分かるメッセージ」を表示する (黙って失敗させない)。
+    /// </summary>
+    private void StartMicTest()
+    {
+        int? deviceIndex = CmbMicDevice.SelectedIndex <= 0 ? null : CmbMicDevice.SelectedIndex - 1;
+
+        try
+        {
+            _micTestRecorder.StartMonitoring(deviceIndex);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"マイクテストを開始できませんでした。デバイスが他のアプリで使用中か、無効になっている可能性があります。\n\n{ex.Message}",
+                "Voice In - マイクテスト",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
+
+        PbMicTestLevel.Value = 0;
+        BtnToggleMicTest.Content = "⏹ マイクテスト停止";
+
+        // Tick を二重登録しないよう、既存のタイマーがあれば使い回す (無ければ生成する)。
+        if (_micTestTimer == null)
+        {
+            _micTestTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            _micTestTimer.Tick += OnMicTestTimerTick;
+        }
+        _micTestTimer.Start();
+    }
+
+    /// <summary>
+    /// マイクテストを停止する。トグルボタン・ウィンドウを閉じたとき・デバイス切り替え時の
+    /// いずれからも呼ばれる。モニタリングしていない状態で呼んでも安全 (AudioRecorder.StopMonitoring
+    /// は冪等)。
+    /// </summary>
+    private void StopMicTest()
+    {
+        _micTestTimer?.Stop();
+        _micTestRecorder.StopMonitoring();
+        PbMicTestLevel.Value = 0;
+        BtnToggleMicTest.Content = "▶ マイクテスト開始";
+    }
+
+    /// <summary>
+    /// マイクテストのバー表示を更新するタイマーコールバック。DispatcherTimer の Tick は
+    /// UI スレッド (このウィンドウの Dispatcher) 上で実行されるため、NAudio のキャプチャ
+    /// コールバック (別スレッド) から直接 UI を更新することにはならない。
+    /// バーの値は移植元 Python 版と同じ min(100, (int)(rms * 300)) (AudioSampleProcessor.RmsToBarValue)。
+    /// </summary>
+    private void OnMicTestTimerTick(object? sender, EventArgs e)
+    {
+        double rms = _micTestRecorder.CurrentMonitoringRms;
+        PbMicTestLevel.Value = AudioSampleProcessor.RmsToBarValue(rms);
+    }
+
+    /// <summary>
+    /// マイク入力デバイスの選択が変わったときに呼ばれる。マイクテスト中に古いデバイスを
+    /// 監視し続けないよう、実行中であれば一旦停止する (再開はユーザーがボタンを押し直す)。
+    /// </summary>
+    private void OnMicDeviceSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_micTestRecorder.IsMonitoring)
+        {
+            StopMicTest();
+        }
     }
 
     /// <summary>
