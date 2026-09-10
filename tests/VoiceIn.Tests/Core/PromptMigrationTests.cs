@@ -131,10 +131,12 @@ public class PromptMigrationTests
     {
         var currentDefaults = new AppSettings();
         var loaded = new AppSettings();
-        // このテストファイルのフィクスチャは LF のみだが、実際に保存されている可能性が高い
-        // CRLF 版を模して変換する (ファイルに直接 CRLF を書き込むと環境依存で壊れやすいため、
-        // 実行時に文字列操作で作る)。
-        loaded.Prompts.GroqRefineSystemPrompt = LegacyGroqRefineSystemPrompt[0].Replace("\n", "\r\n");
+        // 実際に保存されている可能性が高い CRLF 版を、実行時に文字列操作で作る。
+        // フィクスチャは生文字列リテラルなので、その改行コードはこのファイルのチェックアウト方法で
+        // 決まる (core.autocrlf=true の Windows で clone すると CRLF、それ以外では LF)。
+        // Replace("\n", "\r\n") だと CRLF 環境で "\r\r\n" になりテストが壊れるため、
+        // どちらの環境でも確実に CRLF 版になる ReplaceLineEndings を使う。
+        loaded.Prompts.GroqRefineSystemPrompt = LegacyGroqRefineSystemPrompt[0].ReplaceLineEndings("\r\n");
 
         var result = PromptMigration.ApplyLegacyDefaults(loaded, currentDefaults);
 
