@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
+using VoiceIn.Core;
 
 namespace VoiceIn.Ai;
 
@@ -101,7 +102,16 @@ public class GeminiRefineProvider : IRefineProvider
                 var firstPart = parts[0];
                 if (firstPart.TryGetProperty("text", out var textElem))
                 {
-                    return textElem.GetString()?.Trim() ?? rawText;
+                    string? refined = textElem.GetString();
+                    if (string.IsNullOrWhiteSpace(refined))
+                    {
+                        // 2026-09-10 に 16 モデルを実際の整形リクエストで呼んだ範囲では、空応答は再現していない
+                        // (失敗はすべて例外で、呼び出し側が生テキストへフォールバックする)。これは防御である。
+                        // モデル名のみを記録し、文字起こし本文・整形結果・API キーは絶対に含めない。
+                        Logger.Warn($"Gemini 整形の応答が空だったため、生の文字起こし結果を返します (model={model})");
+                    }
+
+                    return RefineOutput.OrRaw(refined, rawText);
                 }
             }
         }

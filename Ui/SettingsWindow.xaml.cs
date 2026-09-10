@@ -1325,13 +1325,87 @@ public partial class SettingsWindow : Window
     }
 
     /// <summary>
-    /// モデル一覧「更新」ボタンの共通処理。取得中はボタンを無効化して二重押しを防ぎ、
-    /// 成功時は ComboBox.ItemsSource を差し替える。ComboBox.Text (ユーザーが選択/入力済みの
-    /// 値) は ItemsSource の差し替え前後で明示的に退避・復元することで、一覧に無い値でも
-    /// 消えないことを保証する。
+    /// RefreshModelListCoreAsync (判定・状態遷移の中核ロジック) が必要とする操作のみを
+    /// 抽象化した internal インターフェース。ComboBox.Text の読み書き・ItemsSource の差し替え・
+    /// ボタンの有効/無効・ステータス表示の文言と表示/非表示のみを持ち、判定ロジックは
+    /// 一切含まない薄い抽象化である。
     ///
-    /// 失敗してもモーダルは出さず、既存の設定保存フロー (OnSaveAndApply) には一切影響しない。
-    /// status (HelperTextStyle の TextBlock) に1行で結果を表示するのみに留める。
+    /// これにより RefreshModelListCoreAsync 自体は WPF に一切依存しない純粋な非同期処理となり、
+    /// SettingsWindow をテストホスト上でインスタンス化せずに (フェイク実装を渡すだけで)
+    /// 単体テストできる (tests/VoiceIn.Tests/Ui/SettingsWindowRefreshModelListCoreTests.cs 参照)。
+    /// </summary>
+    internal interface IModelListView
+    {
+        /// <summary>ComboBox.Text 相当 (IsEditable="True" のユーザー入力/選択値)。</summary>
+        string Text { get; set; }
+
+        /// <summary>ComboBox.ItemsSource 相当。取得成功時にのみ差し替える (書き込み専用)。</summary>
+        IReadOnlyList<string> Items { set; }
+
+        /// <summary>「更新」ボタンの Button.IsEnabled 相当 (書き込み専用)。</summary>
+        bool ButtonEnabled { set; }
+
+        /// <summary>ステータス表示 (TextBlock) の Text 相当 (書き込み専用)。</summary>
+        string StatusText { set; }
+
+        /// <summary>ステータス表示 (TextBlock) の Visibility 相当 (書き込み専用)。</summary>
+        bool StatusVisible { set; }
+    }
+
+    /// <summary>
+    /// IModelListView を、実際の WPF コントロール (ComboBox / Button / TextBlock) にマッピング
+    /// するだけの薄いアダプタ。判定・状態遷移のロジックは一切持たない
+    /// (RefreshModelListCoreAsync 側に一本化されている)。
+    /// </summary>
+    private sealed class ComboBoxModelListView : IModelListView
+    {
+        private readonly System.Windows.Controls.ComboBox _combo;
+        private readonly System.Windows.Controls.Button _button;
+        private readonly TextBlock _status;
+
+        public ComboBoxModelListView(System.Windows.Controls.ComboBox combo, System.Windows.Controls.Button button, TextBlock status)
+        {
+            _combo = combo;
+            _button = button;
+            _status = status;
+        }
+
+        public string Text
+        {
+            get => _combo.Text;
+            set => _combo.Text = value;
+        }
+
+        public IReadOnlyList<string> Items
+        {
+            set => _combo.ItemsSource = value;
+        }
+
+        public bool ButtonEnabled
+        {
+            set => _button.IsEnabled = value;
+        }
+
+        public string StatusText
+        {
+            set => _status.Text = value;
+        }
+
+        public bool StatusVisible
+        {
+            set => _status.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    /// <summary>
+    /// モデル一覧「更新」ボタンの共通処理。判定・状態遷移の実体は RefreshModelListCoreAsync に
+    /// 一本化されており、このメソッドは実際の WPF コントロールを IModelListView でラップして
+    /// 渡すだけの薄いアダプタである。
+    ///
+    /// 【重要】このメソッドの private シグネチャ (ComboBox, Button, TextBlock,
+    /// Func&lt;CancellationToken, Task&lt;IReadOnlyList&lt;string&gt;&gt;&gt;) は変更しないこと
+    /// (3つの OnRefreshXxx ハンドラから呼ばれているほか、テストハーネスがリフレクションで
+    /// 直接呼び出している)。
     /// </summary>
     private async Task RefreshModelListAsync(
         System.Windows.Controls.ComboBox combo,
@@ -1339,36 +1413,79 @@ public partial class SettingsWindow : Window
         TextBlock status,
         Func<CancellationToken, Task<IReadOnlyList<string>>> fetchAsync)
     {
-        string previousText = combo.Text;
-        button.IsEnabled = false;
-        status.Visibility = Visibility.Visible;
-        status.Text = "取得中...";
+        await RefreshModelListCoreAsync(new ComboBoxModelListView(combo, button, status), fetchAsync, _modelCatalogCts.Token);
+    }
+
+    /// <summary>
+    /// モデル一覧「更新」ボタンの判定・状態遷移を担う中核処理 (WPF にも SettingsManager にも
+    /// 依存しない純粋な非同期処理)。取得中は view.ButtonEnabled を false にして二重押しを防ぎ、
+    /// 成功時は view.Items を差し替える。view.Text (ユーザーが選択/入力済みの値) は Items の
+    /// 差し替え前後で明示的に退避・復元することで、一覧に無い値でも消えないことを保証する。
+    ///
+    /// 【欠陥修正】previousText は以前 await の前 (関数冒頭) で退避していたため、取得中に
+    /// ユーザーが Text を打ち替えても、成功時・失敗時のどちらでもその入力が巻き戻ってしまって
+    /// いた (実測済み)。退避は await の後、Items を差し替える直前に行う。失敗時は Items 自体に
+    /// 触れないため、view.Text にも一切触れない (触れなければ、取得中にユーザーが入力した内容が
+    /// そのまま残る)。
+    ///
+    /// windowClosing はウィンドウを閉じたことを示すキャンセルトークン (呼び出し元では
+    /// _modelCatalogCts.Token) であり、fetchAsync にもそのまま渡す。
+    ///
+    /// 失敗してもモーダルは出さず、既存の設定保存フロー (OnSaveAndApply) には一切影響しない。
+    /// view.StatusText (HelperTextStyle の TextBlock 相当) に1行で結果を表示するのみに留める。
+    ///
+    /// internal (AssemblyInfo.cs の InternalsVisibleTo により VoiceIn.Tests から参照可能) にして、
+    /// WPF ホスト無しの単体テストからフェイクの IModelListView を渡して直接検証できるようにする
+    /// (SettingsWindow は WPF の Window でありテストホスト上でインスタンス化できないため、
+    /// SettingsWindowResetToDefaultTests.cs 等と同じ方針)。
+    /// </summary>
+    internal static async Task RefreshModelListCoreAsync(
+        IModelListView view,
+        Func<CancellationToken, Task<IReadOnlyList<string>>> fetchAsync,
+        CancellationToken windowClosing)
+    {
+        view.ButtonEnabled = false;
+        view.StatusVisible = true;
+        view.StatusText = "取得中...";
 
         try
         {
-            IReadOnlyList<string> models = await fetchAsync(_modelCatalogCts.Token);
-            combo.ItemsSource = models;
+            IReadOnlyList<string> models = await fetchAsync(windowClosing);
+
+            // view.Text の退避は await の後、Items を差し替える直前に行う
+            // (await 中にユーザーが入力した内容を巻き戻さないため)。
+            string previousText = view.Text;
+            view.Items = models;
             // IsEditable="True" の ComboBox は ItemsSource の差し替えだけで Text を書き換える
             // ことは無いはずだが、「一覧に無い値でも消してはならない」という要件を確実に
             // 満たすため、念のため明示的に復元する。
-            combo.Text = previousText;
-            status.Text = $"{models.Count}件取得しました。";
+            view.Text = previousText;
+            view.StatusText = $"{models.Count}件取得しました。";
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (windowClosing.IsCancellationRequested)
         {
-            // ウィンドウを閉じたことによるキャンセル。閉じた後の Window に対する UI 更新は
-            // 意味が無い (例外にもならないが、無駄な作業を避けるためここで打ち切る)。
+            // ウィンドウを閉じたことによる本物のキャンセルのときのみ、ここで握り潰す。
+            // 閉じた後の Window に対する UI 更新は意味が無い (例外にもならないが、
+            // 無駄な作業を避けるためここで打ち切る)。
+            //
+            // 【欠陥修正】以前は when 句が無く、HttpClient のタイムアウト
+            // (TaskCanceledException は OperationCanceledException の派生) までここで
+            // 握り潰されてしまい、status が「取得中...」のまま固まっていた (実測済み)。
+            // windowClosing.IsCancellationRequested が false のとき (=ウィンドウを
+            // 閉じたことによる本物のキャンセルではないとき) はこの catch にマッチさせず、
+            // 下の catch (Exception) に流してタイムアウトとして表示させる。
         }
         catch (Exception ex)
         {
-            combo.Text = previousText;
-            status.Text = $"取得失敗: {SummarizeFetchError(ex)}";
+            // view.Items には触れていないため、view.Text も一切変更しない
+            // (取得中にユーザーが入力した内容をそのまま保持するため)。
+            view.StatusText = $"取得失敗: {SummarizeFetchError(ex)}";
         }
         finally
         {
-            if (!_modelCatalogCts.IsCancellationRequested)
+            if (!windowClosing.IsCancellationRequested)
             {
-                button.IsEnabled = true;
+                view.ButtonEnabled = true;
             }
         }
     }
@@ -1379,8 +1496,10 @@ public partial class SettingsWindow : Window
     /// メッセージであっても、ここでは種別ごとの短い日本語文言に置き換える
     /// (InvalidOperationException のみ、APIキー未設定などの分かりやすい文言のため
     /// そのまま表示する)。
+    /// internal (AssemblyInfo.cs の InternalsVisibleTo により VoiceIn.Tests から参照可能) にして、
+    /// 各分岐を単体テストで固定する。
     /// </summary>
-    private static string SummarizeFetchError(Exception ex) => ex switch
+    internal static string SummarizeFetchError(Exception ex) => ex switch
     {
         InvalidOperationException => ex.Message,
         HttpRequestException => "通信エラー",

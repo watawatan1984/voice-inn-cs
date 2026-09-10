@@ -20,8 +20,11 @@ namespace VoiceIn.Ai;
 /// (一覧に無いモデル名を入力した場合も ComboBox.Text はそのまま尊重される)。
 ///
 /// 【実測 (2026-09 時点、確認済み)】
-///   ・Gemini:  GET https://generativelanguage.googleapis.com/v1beta/models?key=&lt;KEY&gt;&amp;pageSize=1000
-///              -&gt; models[] (各要素に name ("models/xxx" 形式) と supportedGenerationMethods[])。40件。
+///   ・Gemini:  GET https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000
+///              (x-goog-api-key ヘッダで認証) -&gt; models[] (各要素に name ("models/xxx" 形式) と
+///              supportedGenerationMethods[])。40件。2026-09-10 に x-goog-api-key ヘッダで
+///              ListModels を呼び、55件を正常取得済み (URL クエリ文字列でのみ受け付けるという
+///              以前の記載は誤りだった)。
 ///   ・Groq:    GET https://api.groq.com/openai/v1/models (Authorization: Bearer &lt;KEY&gt;) -&gt; data[].id。
 ///              全14件中 whisper 系は whisper-large-v3 / whisper-large-v3-turbo の2件。
 ///   ・NVIDIA:  GET https://integrate.api.nvidia.com/v1/models (Authorization: Bearer &lt;KEY&gt;) -&gt; data[].id。81件。
@@ -71,6 +74,15 @@ public static class ModelCatalog
     [
         "embedding", "imagen", "veo", "-tts", "aqa", "image-generation",
         "robotics", "native-audio", "live-", "learnlm", "gemma", "lyria", "nano-banana",
+
+        // 【実測 (2026-09-10)】実データ30件中12件が整形に使えなかったため追加した除外パターン。
+        "transcribe",    // 音声認識専用 (gemini-3.5-transcribe)。アプリの整形リクエスト (systemInstruction 付き)
+                         // には 400「Developer instruction is not enabled for this model」を実測。system 指示なしでも
+                         // 出力トークン0の空応答 (finishReason=STOP) を返し、どちらにしても整形には使えない。
+        "-image",        // 画像生成モデル。このアカウントでは 429 を実測。
+        "computer-use",  // エージェント用のツール操作モデル。このアカウントでは 429 を実測。
+        "deep-research", // エージェント製品。1回の処理が数分かかり、発話ごとの整形には使えない。
+        "antigravity",   // エージェント製品。deep-research と同様、発話ごとの整形には使えない。
     ];
 
     /// <summary>
@@ -90,25 +102,39 @@ public static class ModelCatalog
             throw new InvalidOperationException("Gemini の API キーが指定されていません。");
         }
 
-        // 【実測済み】Gemini の ListModels は API キーをヘッダではなく URL クエリ文字列で
-        // 受け取る仕様 (Ai/GeminiProvider.cs 等の generateContent 呼び出しが使う
-        // x-goog-api-key ヘッダとは異なる)。この URL 自体にキーが含まれるため、
-        // 例外メッセージ・ログの類には url 変数の値を絶対に含めないこと。
-        string url = $"https://generativelanguage.googleapis.com/v1beta/models?key={Uri.EscapeDataString(apiKey)}&pageSize=1000";
-
         string body;
-        using (var request = new HttpRequestMessage(HttpMethod.Get, url))
+        using (var request = BuildGeminiListModelsRequest(apiKey))
         using (var response = await _httpClient.SendAsync(request, ct).ConfigureAwait(false))
         {
             body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
-                // ステータスコード・レスポンス本文のみを含める (URL・API キーは含めない)。
+                // ステータスコード・レスポンス本文のみを含める (API キーは含めない)。
                 throw new HttpRequestException($"Gemini モデル一覧取得エラー ({(int)response.StatusCode}): {TruncateForError(body)}");
             }
         }
 
         return ParseGeminiModels(body);
+    }
+
+    /// <summary>
+    /// Gemini ListModels 用の HTTP リクエストを組み立てる純粋関数 (ネットワークに出ない)。
+    ///
+    /// 【実測 (2026-09-10)】x-goog-api-key ヘッダを付けて ListModels を呼び、55件を正常取得済み。
+    /// Ai/GeminiProvider.cs:28,71 と Ai/GeminiRefineProvider.cs:47,79 の generateContent 呼び出しが
+    /// 「API キーは URL クエリ文字列ではなくヘッダで送る (プロキシ・DLP 機器のログに平文で
+    /// 残りうるため)」という方針を採っているのと同じ理由で、ListModels でもヘッダ送信に統一する
+    /// (以前あった「ListModels はキーを URL クエリでしか受け取らない」という記載は誤りだった)。
+    /// RequestUri には pageSize のみを含め、API キーは一切含めない。
+    /// </summary>
+    /// <param name="apiKey">Gemini の API キー。呼び出し前の空・null チェックは呼び出し元の責務。</param>
+    internal static HttpRequestMessage BuildGeminiListModelsRequest(string apiKey)
+    {
+        var request = new HttpRequestMessage(
+            HttpMethod.Get,
+            "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000");
+        request.Headers.Add("x-goog-api-key", apiKey);
+        return request;
     }
 
     /// <summary>
@@ -232,10 +258,33 @@ public static class ModelCatalog
         return results.ToList();
     }
 
+    // NVIDIA の /v1/models は modality (音声/画像/テキスト等) を判別できるフィールドを
+    // 応答に含まないため、以前は絞り込みを一切行わず全件返していた。しかし実データ80件のうち
+    // 約25件がテキスト整形用途には使えない (画像・埋め込み・安全判定・翻訳・パーサー等)
+    // ことを実測したため、名前 (id) にこれらの文字列を含むものは候補から除外する。
+    // "vila" と "neva" は短く他のモデル名に部分一致しやすいため、スラッシュを含めて照合する。
+    private static readonly string[] NvidiaExcludedNamePatterns =
+    [
+        "embed",          // embedding 専用モデル (nemotron-3-embed-1b)。整形用途では 404 を実測。
+        "reward",         // 報酬モデル (nemotron-4-340b-reward)。整形用途では 404 を実測。
+        "guard",          // 安全判定器 (meta/llama-guard-4-12b)。整形依頼に60秒無応答を実測。
+        "safety",         // 安全判定器 (nemotron-3.5-content-safety)。選ぶと発言の代わりに
+                          // "User Safety: safe" が貼り付けられることを実測。
+        "nemotron-parse", // ドキュメント解析専用。「テキスト入力非対応」の 400 を実測。
+        "translate",      // 翻訳特化モデル (riva-translate-4b-instruct-v2)。指示文ごとオウム返しすることを実測。
+        "nvclip",         // 画像・テキスト対照学習 (CLIP系) モデル (nvclip)。整形用途では 404 を実測。
+        "detector",       // 動画検出モデル (ai-synthetic-video-detector)。整形用途では 500 を実測。
+        "fuyu",           // マルチモーダル (画像) モデル (adept/fuyu-8b)。整形用途では 404 を実測。
+        "kosmos",         // マルチモーダル (画像) モデル (microsoft/kosmos-2)。整形用途では 404 を実測。
+        "/vila",          // マルチモーダル (画像) モデル (nvidia/vila)。整形用途では 404 を実測。
+        "/neva",          // マルチモーダル (画像) モデル (nvidia/neva-22b)。整形用途では 404 を実測。
+        "deplot",         // グラフ画像→テキストのモデル (google/deplot)。整形用途では 404 を実測。
+    ];
+
     /// <summary>
     /// NVIDIA の /v1/models からモデル一覧を取得する。modality (音声/画像/テキスト等) を
-    /// 判別できるフィールドが応答に無いため、絞り込みは行わず id でソートして全件返す
-    /// (戻り値は重複なし)。
+    /// 判別できるフィールドが応答に無いため、NvidiaExcludedNamePatterns による名前ベースの
+    /// 除外のみを行い、id でソートして返す (戻り値は重複なし)。
     /// </summary>
     /// <exception cref="InvalidOperationException">apiKey が空または空白のみの場合。</exception>
     public static async Task<IReadOnlyList<string>> FetchNvidiaModelsAsync(string apiKey, CancellationToken ct)
@@ -259,7 +308,8 @@ public static class ModelCatalog
     }
 
     /// <summary>
-    /// NVIDIA /v1/models の応答 JSON から id 一覧を抽出する純粋関数。
+    /// NVIDIA /v1/models の応答 JSON から、テキスト整形に使えるモデル id 一覧を抽出する純粋関数
+    /// (NvidiaExcludedNamePatterns に該当するものは除外する)。
     /// API キーを一切扱わないため、ネットワークに出ずに単体テストできる。
     /// </summary>
     internal static IReadOnlyList<string> ParseNvidiaModels(string json)
@@ -278,10 +328,17 @@ public static class ModelCatalog
                 }
 
                 string? id = idElem.GetString();
-                if (!string.IsNullOrWhiteSpace(id))
+                if (string.IsNullOrWhiteSpace(id))
                 {
-                    results.Add(id);
+                    continue;
                 }
+
+                if (NvidiaExcludedNamePatterns.Any(p => id.Contains(p, StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+
+                results.Add(id);
             }
         }
 

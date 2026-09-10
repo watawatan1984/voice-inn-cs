@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
+using VoiceIn.Core;
 
 namespace VoiceIn.Ai;
 
@@ -101,9 +102,18 @@ public class NvidiaRefineProvider : IRefineProvider
             // 【厳守】reasoning_content は絶対に読まない。content のみを読む。
             // クラスコメントのとおり、thinking を無効化していれば content には正しい整形結果
             // のみが入る。reasoning_content を読む・フォールバックするコードを絶対に追加しないこと。
+            // 空応答の場合のフォールバック先も rawText のみであり、reasoning_content には
+            // 絶対にフォールバックしない (RefineOutput.OrRaw は rawText 以外を知らない純粋関数)。
             if (msg.TryGetProperty("content", out var contentElem))
             {
-                return contentElem.GetString()?.Trim() ?? rawText;
+                string? refined = contentElem.GetString();
+                if (string.IsNullOrWhiteSpace(refined))
+                {
+                    // モデル名のみを記録し、文字起こし本文・整形結果・API キーは絶対に含めない。
+                    Logger.Warn($"NVIDIA 整形の応答が空だったため、生の文字起こし結果を返します (model={refineModel})");
+                }
+
+                return RefineOutput.OrRaw(refined, rawText);
             }
         }
 
