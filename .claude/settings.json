@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "K=\"${HOME:-$USERPROFILE}/.claude/tools/kg.py\"; if [ -f \"$K\" ] && command -v python >/dev/null 2>&1; then python \"$K\" hook post-edit 2>/dev/null; else cat >/dev/null 2>&1; fi; exit 0",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat >/dev/null 2>&1; K=\"${HOME:-$USERPROFILE}/.claude/tools/kg.py\"; [ -f \"$K\" ] && command -v python >/dev/null 2>&1 || exit 0; python \"$K\" status --brief \"$CLAUDE_PROJECT_DIR\" 2>/dev/null; exit 0",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

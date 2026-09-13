@@ -32,3 +32,7 @@ GRAPH_REPORT.md
 obsidian/
 wiki/
 .serena/
+
+## Claude Code project settings (share project hooks; keep personal overrides local)
+!.claude/settings.json
+.claude/settings.local.json
